@@ -256,6 +256,10 @@ import type {
 } from '../shared/speech-types'
 import type { TelemetryConsentState } from '../shared/telemetry-consent-types'
 import type {
+  OmpRpcGetCommandsResult,
+  OmpRpcRunLocalCommandResult
+} from '../shared/omp-rpc-ipc-contract'
+import type {
   PreflightRuntimeContext,
   RefreshAgentsResult,
   NativeChatAppendedPayload,
@@ -4550,6 +4554,15 @@ const api = {
         ipcRenderer.send('nativeChat:unsubscribe', { subscriptionId: args.subscriptionId })
       }
     }
+  },
+
+  ompRpc: {
+    getCommands: (args: { cwd: string }): Promise<OmpRpcGetCommandsResult> =>
+      ipcRenderer.invoke('ompRpc:getCommands', args),
+    runLocalCommand: (args: {
+      cwd: string
+      command: string
+    }): Promise<OmpRpcRunLocalCommandResult> => ipcRenderer.invoke('ompRpc:runLocalCommand', args)
   },
 
   runtime: {
