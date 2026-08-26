@@ -11,14 +11,12 @@ import {
 import type { NativeChatSendHandle } from './native-chat-runtime-send'
 import { resolveNativeChatLaunchDraftSend } from './native-chat-launch-draft-send'
 import { getVerifiedNativeChatCommands } from '../../../../shared/native-chat-agent-profiles'
+import { useOmpRpcCommands, useOmpRpcProbeCwd } from './use-omp-rpc-commands'
+import { useOmpRpcLocalCommandSend } from './use-omp-rpc-local-command-send'
+import { useNativeChatComposerTextEditing } from './use-native-chat-composer-text-editing'
 import { isSlashCommandDraft } from '../../../../shared/native-chat-slash-commands'
 import { emitNativeChatMessageSent } from '@/lib/native-chat-telemetry'
-import {
-  applyMentionSuggestion,
-  EMPTY_HISTORY,
-  pushHistory,
-  type HistoryState
-} from './native-chat-composer-state'
+import { EMPTY_HISTORY, pushHistory, type HistoryState } from './native-chat-composer-state'
 import { readNativeChatDraftCache } from './native-chat-draft-cache'
 import { useNativeChatDraft } from './use-native-chat-draft'
 import { useNativeChatLaunchDraftAdoption } from './use-native-chat-launch-draft-adoption'
@@ -104,7 +102,6 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
     const [notice, setNotice] = useState<string | null>(null)
     const [dictationPressed, setDictationPressed] = useState(false)
     const textareaRef = useRef<HTMLTextAreaElement>(null)
-    const isComposingRef = useRef(false)
     const { cancelPendingSends, trackPendingSend } = useNativeChatSendLifecycle(
       terminalTabId,
       targetPtyId,
@@ -129,7 +126,10 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       setCaret(readNativeChatDraftCache(draftScopeKey).length)
     }
 
-    const agentCommands = useMemo(() => getVerifiedNativeChatCommands(agent), [agent])
+    const staticAgentCommands = useMemo(() => getVerifiedNativeChatCommands(agent), [agent])
+    // OMP publishes its catalog over RPC; every other agent keeps the static one.
+    const agentCommands = useOmpRpcCommands(agent, terminalTabId, staticAgentCommands)
+    const ompRpcCwd = useOmpRpcProbeCwd(agent, terminalTabId)
     const picker = useNativeChatPickerState({
       agent,
       terminalTabId,
@@ -150,6 +150,17 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       dismiss,
       handleDraftOrCaretChange
     } = picker
+    const textEditing = useNativeChatComposerTextEditing({
+      draft,
+      caret,
+      autocomplete,
+      textareaRef,
+      setDraft,
+      setCaret,
+      setHistory,
+      setActiveSuggestion,
+      handleDraftOrCaretChange
+    })
 
     // Resolve the live ptyId for this chat leaf; runtime owner settings route
     // local vs remote (SSH) sends.
@@ -161,10 +172,6 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
     }, [targetPtyId, terminalTabId])
 
     const [hasPty, disabled] = [targetPtyId !== null, targetPtyId === null || !canSend]
-
-    const syncCaret = useCallback((el: HTMLTextAreaElement) => {
-      setCaret(el.selectionStart ?? el.value.length)
-    }, [])
 
     const { imageAttachments, attachResolvedPaths, clearImageAttachments, removeImageAttachment } =
       useNativeChatComposerAttachments({
@@ -236,6 +243,13 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
         readTerminalScreen
       })
 
+    const sendOmpLocalCommand = useOmpRpcLocalCommandSend({
+      agent,
+      ompRpcCwd,
+      resolveTarget,
+      onSlashCommand
+    })
+
     const send = useCallback(() => {
       const text = draft
       const imagePaths = imageAttachments.map((attachment) => attachment.path)
@@ -250,6 +264,17 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       }
       const target = resolveTarget()
       if (!target) {
+        return
+      }
+      // Why: `/usage` is a LOCAL command — running it over RPC returns its output
+      // to render here instead of leaving it only on the TUI screen. Every other
+      // command (and a failed probe) keeps the PTY path below untouched.
+      if (sendOmpLocalCommand(text)) {
+        setHistory((prev) => pushHistory(prev, text))
+        setDraft('')
+        setCaret(0)
+        clearSkillOrigin()
+        setNotice(null)
         return
       }
       const classification = classifySend(text)
@@ -327,6 +352,7 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       resolveTarget,
       onOptimisticSend,
       onSlashCommand,
+      sendOmpLocalCommand,
       sessionOptionsSurface,
       terminalTabId,
       trackPendingSend,
@@ -348,6 +374,7 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
 
     const dispatchPickerCommand = useNativeChatPickerCommandDispatch({
       agent,
+      ompRpcCwd,
       disabled,
       isDispatchingSessionOption,
       resolveTarget,
@@ -368,7 +395,7 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       activeSuggestion,
       draft,
       history,
-      isComposing: () => isComposingRef.current,
+      isComposing: textEditing.isComposing,
       completePickerItem: completeItem,
       dispatchPickerCommand,
       dismissPicker: dismiss,
@@ -379,17 +406,6 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       setCaret,
       setHistory
     })
-
-    const handleDraftChange = useCallback(
-      (value: string, element: HTMLTextAreaElement) => {
-        setDraft(value)
-        setHistory((prev) => ({ entries: prev.entries, index: null }))
-        syncCaret(element)
-        handleDraftOrCaretChange(value, element.selectionStart ?? value.length)
-        setActiveSuggestion(0)
-      },
-      [handleDraftOrCaretChange, setDraft, syncCaret]
-    )
 
     return (
       <NativeChatComposerField
@@ -408,37 +424,16 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
         dictationDisabled={dictationDisabled}
         isDictating={isDictating}
         isDictationHoldMode={isDictationHoldMode}
-        onDraftChange={handleDraftChange}
-        onTextareaSelect={(element) => {
-          syncCaret(element)
-          handleDraftOrCaretChange(element.value, element.selectionStart ?? element.value.length)
-          setActiveSuggestion(0)
-        }}
+        onDraftChange={textEditing.handleDraftChange}
+        onTextareaSelect={textEditing.handleTextareaSelect}
         onKeyDown={handleKeyDown}
-        onCompositionStart={() => {
-          isComposingRef.current = true
-        }}
-        onCompositionEnd={(event) => {
-          isComposingRef.current = false
-          if (event.currentTarget.value !== draft) {
-            handleDraftChange(event.currentTarget.value, event.currentTarget)
-          }
-        }}
+        onCompositionStart={textEditing.handleCompositionStart}
+        onCompositionEnd={(event) => textEditing.handleCompositionEnd(event.currentTarget)}
         onPaste={handlePaste}
         pickerListboxId={picker.listboxId}
         onChoosePickerItem={completeItem}
         onRetrySkills={picker.retrySkills}
-        onAcceptMention={() => {
-          if (autocomplete.mode !== 'mention') {
-            return
-          }
-          const result = applyMentionSuggestion(draft, caret, autocomplete.query)
-          setDraft(result.draft)
-          setCaret(result.caret)
-          const textarea = textareaRef.current
-          textarea?.focus()
-          requestAnimationFrame(() => textarea?.setSelectionRange(result.caret, result.caret))
-        }}
+        onAcceptMention={textEditing.acceptMention}
         onRemoveImageAttachment={(id) => removeImageAttachment(id)}
         onAttach={pickAttachment}
         onDictationToggle={toggleDictation}

@@ -17,13 +17,17 @@ import {
 } from './native-chat-composer-state'
 import type { NativeChatSendLifecycle } from './use-native-chat-send-lifecycle'
 import type { NativeChatPtySessionOptionsSurface } from './native-chat-pty-session-options'
+import type { NativeChatCommandMarkerOutcome } from './native-chat-command-marker'
+import { runOmpLocalCommand, shouldRouteOmpLocalCommand } from './omp-rpc-local-command-route'
 
 export function useNativeChatPickerCommandDispatch(args: {
   agent: AgentType
+  /** Working directory keying the OMP RPC probe; null disables RPC routing. */
+  ompRpcCwd?: string | null
   disabled: boolean
   isDispatchingSessionOption: boolean
   resolveTarget: () => NativeChatResolvedTarget | null
-  onSlashCommand?: (command: string) => void
+  onSlashCommand?: (command: string, outcome?: NativeChatCommandMarkerOutcome) => void
   sessionOptionsSurface: NativeChatPtySessionOptionsSurface | null
   trackPendingSend: NativeChatSendLifecycle['trackPendingSend']
   setHistory: Dispatch<SetStateAction<HistoryState>>
@@ -36,6 +40,7 @@ export function useNativeChatPickerCommandDispatch(args: {
 }): (command: Extract<NativeChatPickerItem, { kind: 'command' }>) => void {
   const {
     agent,
+    ompRpcCwd = null,
     disabled,
     isDispatchingSessionOption,
     resolveTarget,
@@ -55,6 +60,32 @@ export function useNativeChatPickerCommandDispatch(args: {
       const text = `/${command.name}`
       const target = resolveTarget()
       if (!target || disabled || isDispatchingSessionOption) {
+        return
+      }
+      // Why: picking `/usage` from the menu must behave exactly like typing it —
+      // same RPC route, same rendered output, same PTY fallback.
+      if (shouldRouteOmpLocalCommand(agent, text)) {
+        void runOmpLocalCommand(ompRpcCwd, text).then((outcome) => {
+          if (outcome) {
+            onSlashCommand?.(text, outcome)
+            return
+          }
+          const fallbackTarget = resolveTarget()
+          if (fallbackTarget) {
+            trackPendingSend(
+              sendNativeChatMessage(fallbackTarget.settings, fallbackTarget.ptyId, text)
+            )
+            onSlashCommand?.(text)
+          }
+        })
+        emitNativeChatPickerItemAccepted({ agent, itemKind: 'command' })
+        emitNativeChatSendClassified({ agent, outcome: 'command' })
+        setHistory((previous) => pushHistory(previous, text))
+        setDraft('')
+        setCaret(0)
+        setActiveSuggestion(0)
+        clearSkillOrigin()
+        setNotice(null)
         return
       }
       trackPendingSend(
@@ -87,6 +118,7 @@ export function useNativeChatPickerCommandDispatch(args: {
       clearSkillOrigin,
       disabled,
       isDispatchingSessionOption,
+      ompRpcCwd,
       onSlashCommand,
       resolveTarget,
       sessionOptionsSurface,

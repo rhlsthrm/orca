@@ -34,7 +34,8 @@ import {
   applyCommandMarkerBoundaries,
   commandMarkersAsMessages,
   readCommandMarkerCache,
-  type NativeChatCommandMarker
+  type NativeChatCommandMarker,
+  type NativeChatCommandMarkerOutcome
 } from './native-chat-command-marker'
 import {
   deriveNativeChatStreamingText,
@@ -258,8 +259,8 @@ function NativeChatResolvedView({
     [pendingScope]
   )
   const onSlashCommand = useCallback(
-    (command: string) => {
-      setCommandMarkers(appendCommandMarkerCache(commandMarkerScope, command))
+    (command: string, outcome?: NativeChatCommandMarkerOutcome) => {
+      setCommandMarkers(appendCommandMarkerCache(commandMarkerScope, command, Date.now(), outcome))
     },
     [commandMarkerScope]
   )

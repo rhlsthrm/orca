@@ -1,5 +1,6 @@
 import type { AgentType } from '../../../../shared/agent-status-types'
 import type { NativeChatLaunchDraft } from '@/lib/native-chat-launch-prompt'
+import type { NativeChatCommandMarkerOutcome } from './native-chat-command-marker'
 
 export type NativeChatComposerProps = {
   /** Tab hosting the agent; used to resolve the live ptyId + runtime settings. */
@@ -19,8 +20,10 @@ export type NativeChatComposerProps = {
   onOptimisticSend?: (text: string, imagePaths?: string[]) => string | undefined
   /** Remove an optimistic echo when its delayed submit is canceled. */
   onOptimisticSendCanceled?: (pendingId: string) => void
-  /** Record a dispatched slash command that does not create a chat turn. */
-  onSlashCommand?: (command: string) => void
+  /** Record a dispatched slash command that does not create a chat turn.
+   *  `outcome` is present only for commands Orca ran over RPC (OMP `/usage`),
+   *  carrying the output to render and whether the model was invoked. */
+  onSlashCommand?: (command: string, outcome?: NativeChatCommandMarkerOutcome) => void
   /** Picker-only agent commands continue in the hosted TUI after dispatch. */
   onSwitchToTerminal?: () => void
   /** Reads the hosted TUI's current rendered screen when chat is entered. */
