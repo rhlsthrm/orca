@@ -49,7 +49,20 @@ export type OmpRpcChatAcquireResult =
   | { ok: true }
   | { ok: false; reason: OmpRpcChatAcquireFailureReason }
 
-export type OmpRpcChatReleaseArgs = { paneKey: string }
+/** Present when the caller (the acquire effect's cleanup, on unmount) wants
+ *  a PTY respawned into the exact same pane once release actually settles
+ *  and exits — never on a fail-closed release that keeps the claim. Only
+ *  echoed back via the `ompRpcChat:handback` push event, never itself
+ *  driving the respawn on the main side (Critical B: main owns the
+ *  settle-wait and release ordering; the renderer's always-mounted
+ *  TerminalPane drives the actual `pty.spawn`, not this hook). */
+export type OmpRpcChatHandbackRespawnContext = {
+  replacedPtyId: string
+  cwd: string
+  sessionId: string
+}
+
+export type OmpRpcChatReleaseArgs = { paneKey: string; respawn?: OmpRpcChatHandbackRespawnContext }
 export type OmpRpcChatReleaseResult = { released: boolean }
 
 export type OmpRpcChatSendBehavior = 'idle' | OmpRpcStreamingBehavior
@@ -81,3 +94,12 @@ export type OmpRpcChatEventPayload = {
   subscriptionId: string
   event: OmpRpcClientEvent
 }
+
+/** Pushed on `ompRpcChat:handback` once a `release({ respawn })` call
+ *  genuinely settles+exits (never on a fail-closed release) — a durable,
+ *  always-mounted listener (use-omp-rpc-chat-handback-listener.ts, wired
+ *  into TerminalPane) performs the actual PTY respawn, since the hook that
+ *  requested it may already be unmounted by the time this arrives. */
+export type OmpRpcChatHandbackPayload = {
+  paneKey: string
+} & OmpRpcChatHandbackRespawnContext
