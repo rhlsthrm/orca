@@ -203,7 +203,59 @@ describe('OMP RPC session ownership', () => {
     expect(buildResumeLaunch).not.toHaveBeenCalled()
   })
 
-  it('aborts and settles streaming work before reading the session path', async () => {
+  // Critical B (cross-lab review, wave 5): handoffToPty used to abort a
+  // streaming turn unconditionally — the exact "a mere view toggle silently
+  // aborts an in-flight turn" outcome Decision 1/F9 forbid. Default is now
+  // never-abort; only an explicit `allowAbort: true` caller may abort.
+  it('never aborts a streaming turn by default — waits for it to settle before reading the session path', async () => {
+    const order: string[] = []
+    const streamingState: OmpRpcSessionState = {
+      get sessionFile() {
+        order.push('read-stale-path')
+        return '/sessions/stale.jsonl'
+      },
+      sessionId: 'session-current',
+      isStreaming: true,
+      isCompacting: false,
+      queuedMessageCount: 0
+    }
+    const finalState: OmpRpcSessionState = {
+      get sessionFile() {
+        order.push('read-path')
+        return '/sessions/current.jsonl'
+      },
+      sessionId: 'session-current',
+      isStreaming: false,
+      isCompacting: false,
+      queuedMessageCount: 0
+    }
+    const getState = vi
+      .fn<() => Promise<OmpRpcSessionState>>()
+      .mockResolvedValueOnce(streamingState)
+      .mockResolvedValue(finalState)
+    const abort = vi.fn(async () => {
+      order.push('abort')
+    })
+    const client = fakeClient({ getState, abort })
+    const owner = new OmpRpcSessionOwner({
+      registry: new ClaimedAgentPtyOwnerRegistry(),
+      spawnClient: () => client,
+      waitForSettle: async () => {
+        order.push('settle')
+        return { status: 'settled' }
+      },
+      proveRpcExit: async () => ({ status: 'exited' }),
+      buildResumeLaunch: () => 'omp --resume /sessions/current.jsonl'
+    })
+    const session = acquiredSession(await owner.acquire({ claim: claim(), spawnOptions })).session
+
+    await owner.handoffToPty({ session, baseCommand: 'omp', shell: 'posix' })
+
+    expect(order).toEqual(['settle', 'read-path'])
+    expect(abort).not.toHaveBeenCalled()
+  })
+
+  it('aborts and settles streaming work before reading the session path when allowAbort is explicitly set', async () => {
     const order: string[] = []
     const streamingState: OmpRpcSessionState = {
       get sessionFile() {
@@ -247,9 +299,42 @@ describe('OMP RPC session ownership', () => {
     })
     const session = acquiredSession(await owner.acquire({ claim: claim(), spawnOptions })).session
 
-    await owner.handoffToPty({ session, baseCommand: 'omp', shell: 'posix' })
+    await owner.handoffToPty({ session, baseCommand: 'omp', shell: 'posix', allowAbort: true })
 
     expect(order).toEqual(['abort', 'settle', 'read-path'])
+  })
+
+  // Critical B: the unmount path (leave Chat view, pane force-close, app
+  // quit) must fail closed rather than silently killing live work — a turn
+  // that never settles within the bounded wait keeps the claim, and the
+  // client is never disposed out from under it.
+  it('fails closed without disposing the client when a streaming turn never settles', async () => {
+    const streamingState: OmpRpcSessionState = {
+      sessionFile: '/sessions/current.jsonl',
+      sessionId: 'session-current',
+      isStreaming: true,
+      isCompacting: false,
+      queuedMessageCount: 0
+    }
+    const client = fakeClient({ getState: vi.fn(async () => streamingState) })
+    const owner = new OmpRpcSessionOwner({
+      registry: new ClaimedAgentPtyOwnerRegistry(),
+      spawnClient: () => client,
+      waitForSettle: async () => ({
+        status: 'unverifiable',
+        reason: 'OMP RPC session did not settle before timeout'
+      })
+    })
+    const session = acquiredSession(await owner.acquire({ claim: claim(), spawnOptions })).session
+
+    await expect(
+      owner.handoffToPty({ session, baseCommand: 'omp', shell: 'posix' })
+    ).resolves.toEqual({
+      status: 'unverifiable',
+      reason: 'OMP RPC session did not settle before timeout'
+    })
+    expect(client.dispose).not.toHaveBeenCalled()
+    expect(client.abort).not.toHaveBeenCalled()
   })
 
   it('proves the PTY exited before spawning and switching the RPC child', async () => {

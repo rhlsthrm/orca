@@ -198,15 +198,27 @@ export class OmpRpcSessionOwner {
     }
   }
 
+  /** Settles the release ordering: dispose -> prove exit -> release ->
+   *  resume-launch (module doc). `allowAbort` defaults to false — a
+   *  streaming turn is left running and this only waits (bounded, via
+   *  `waitForSettle`) for it to settle on its own; the caller gets
+   *  `unverifiable` back (claim kept, nothing disposed) if it never does.
+   *  Critical B (cross-lab review, wave 5): the release-on-unmount path
+   *  (leaving Chat view, pane force-close, app quit) must fail closed
+   *  rather than silently aborting live work — only an explicit opt-in
+   *  caller may set `allowAbort: true`. No caller does today; the flag
+   *  exists so a future explicit "stop and switch" action can, without
+   *  reintroducing an implicit abort on every release. */
   async handoffToPty(args: {
     session: OmpRpcOwnedSession
     baseCommand: string
     shell: AgentStartupShell
+    allowAbort?: boolean
   }): Promise<OmpRpcToPtyHandoffResult> {
     let state: OmpRpcSessionState
     try {
       state = await args.session.client.getState()
-      if (state.isStreaming) {
+      if (state.isStreaming && args.allowAbort) {
         await args.session.client.abort()
       }
       if (!isSettled(state)) {
