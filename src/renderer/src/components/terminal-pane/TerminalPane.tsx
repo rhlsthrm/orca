@@ -69,6 +69,7 @@ import {
   clearPaneTitleOverlayRects
 } from './pane-title-overlay-rects'
 import NativeChatView from '../native-chat/NativeChatView'
+import { useOmpRpcChatHandbackListener } from '../native-chat/use-omp-rpc-chat-handback-listener'
 import { splitTerminalPaneWithInheritedCwd } from './terminal-pane-split-with-inherited-cwd'
 import { TerminalAgentSessionForkDialog } from './TerminalAgentSessionForkDialog'
 import { AgentSessionContinuationDialog } from '@/components/agent-session-continuation/AgentSessionContinuationDialog'
@@ -322,6 +323,10 @@ function TerminalPane(
   ref: React.ForwardedRef<TerminalPaneHandle>
 ): React.JSX.Element {
   const containerRef = useRef<HTMLDivElement>(null)
+  // Critical B (wave 5): this hook, not the (un)mountable NativeChatView's
+  // own chat-session hook, owns the actual PTY respawn on hand-back — see
+  // use-omp-rpc-chat-handback-listener.ts.
+  useOmpRpcChatHandbackListener(tabId)
   const managerRef = useRef<PaneManager | null>(null)
   const paneFontSizesRef = useRef<Map<number, number>>(new Map())
   const expandedPaneIdRef = useRef<number | null>(null)

@@ -264,6 +264,7 @@ import type {
   OmpRpcChatAcquireArgs,
   OmpRpcChatAcquireResult,
   OmpRpcChatEventPayload,
+  OmpRpcChatHandbackPayload,
   OmpRpcChatReleaseArgs,
   OmpRpcChatReleaseResult,
   OmpRpcChatResolveSessionIdentityArgs,
@@ -4610,6 +4611,14 @@ const api = {
         ipcRenderer.removeListener('ompRpcChat:event', listener)
         ipcRenderer.send('ompRpcChat:unsubscribe', { subscriptionId: args.subscriptionId })
       }
+    },
+    onHandback: (onEvent: (payload: OmpRpcChatHandbackPayload) => void): (() => void) => {
+      const listener = (
+        _event: Electron.IpcRendererEvent,
+        payload: OmpRpcChatHandbackPayload
+      ): void => onEvent(payload)
+      ipcRenderer.on('ompRpcChat:handback', listener)
+      return () => ipcRenderer.removeListener('ompRpcChat:handback', listener)
     }
   },
 

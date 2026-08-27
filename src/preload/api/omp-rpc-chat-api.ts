@@ -2,6 +2,7 @@ import type {
   OmpRpcChatAbortArgs,
   OmpRpcChatAcquireArgs,
   OmpRpcChatAcquireResult,
+  OmpRpcChatHandbackPayload,
   OmpRpcChatReleaseArgs,
   OmpRpcChatReleaseResult,
   OmpRpcChatResolveSessionIdentityArgs,
@@ -35,4 +36,11 @@ export type OmpRpcChatApi = {
     args: OmpRpcChatSubscribeArgs,
     onEvent: (event: OmpRpcClientEvent) => void
   ) => () => void
+  /** Pushed once a `release({ respawn })` genuinely settles+exits (Critical
+   *  B, wave 5) — a durable listener (TerminalPane, via
+   *  use-omp-rpc-chat-handback-listener.ts) performs the actual PTY
+   *  respawn, since the hook that requested release may already be
+   *  unmounted by the time this arrives. Not scoped like `subscribe`: every
+   *  window listens and filters by `paneKey` itself. */
+  onHandback: (onEvent: (payload: OmpRpcChatHandbackPayload) => void) => () => void
 }

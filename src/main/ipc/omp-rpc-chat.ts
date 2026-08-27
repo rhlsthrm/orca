@@ -12,6 +12,7 @@ import type {
   OmpRpcChatAcquireArgs,
   OmpRpcChatAcquireResult,
   OmpRpcChatEventPayload,
+  OmpRpcChatHandbackPayload,
   OmpRpcChatReleaseArgs,
   OmpRpcChatReleaseResult,
   OmpRpcChatResolveSessionIdentityArgs,
@@ -152,10 +153,23 @@ export function registerOmpRpcChatHandlers(): void {
       if (!ptyId || !cwd) {
         return null
       }
+      // Why (finding E, cross-lab review): the mtime-fallback sub-path
+      // inside resolveOmpPaneSessionIdentity depends only on `cwd`, not
+      // `ptyId` — unlike the breadcrumb sub-path, it has no independent
+      // locality gate of its own. Today the renderer's own
+      // `runtimeEnvironmentId === null` check is the only thing keeping an
+      // SSH pane's remote cwd from ever reaching this handler; verify
+      // locality here too instead of trusting that gate alone.
+      if (!localPtyProvider(ptyId)) {
+        return null
+      }
       try {
         const resolved = await resolveOmpPaneSessionIdentity(
           { ptyId, cwd },
-          { getSlavePath: localGetSlavePath }
+          {
+            getSlavePath: localGetSlavePath,
+            claimedSessionFilePaths: getRegistry().claimedSessionFilePaths()
+          }
         )
         return resolved ? { sessionId: resolved.sessionId, source: resolved.source } : null
       } catch {
@@ -218,12 +232,27 @@ export function registerOmpRpcChatHandlers(): void {
 
   ipcMain.handle(
     'ompRpcChat:release',
-    async (_event, args: OmpRpcChatReleaseArgs): Promise<OmpRpcChatReleaseResult> => {
+    async (event, args: OmpRpcChatReleaseArgs): Promise<OmpRpcChatReleaseResult> => {
       const paneKey = args?.paneKey?.trim()
       if (!paneKey) {
         return { released: false }
       }
       const result = await getRegistry().release(paneKey)
+      // Why (Critical B, wave 5): only a release that genuinely settled and
+      // exited hands the pane back — a fail-closed release (turn still
+      // streaming) keeps the claim and must never trigger a respawn. The
+      // sender may have already navigated away or closed by the time this
+      // resolves (release can take up to the settle-wait's bound); a
+      // destroyed WebContents throws on send.
+      if (result.released && args.respawn && !event.sender.isDestroyed()) {
+        const payload: OmpRpcChatHandbackPayload = {
+          paneKey,
+          replacedPtyId: args.respawn.replacedPtyId,
+          cwd: args.respawn.cwd,
+          sessionId: args.respawn.sessionId
+        }
+        event.sender.send('ompRpcChat:handback', payload)
+      }
       return { released: result.released }
     }
   )

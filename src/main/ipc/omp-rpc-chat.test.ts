@@ -10,13 +10,15 @@ const {
   RegistryCtor,
   resolveOmpExecutablePath,
   resolveSessionFilePath,
-  resolveOmpPaneSessionIdentity
+  resolveOmpPaneSessionIdentity,
+  tryGetProviderForPty
 } = vi.hoisted(() => {
   const registryInstance = {
     acquire: vi.fn(),
     release: vi.fn(),
     get: vi.fn(),
-    disposeAll: vi.fn()
+    disposeAll: vi.fn(),
+    claimedSessionFilePaths: vi.fn(() => new Set<string>())
   }
   return {
     handle: vi.fn(),
@@ -28,7 +30,8 @@ const {
     }),
     resolveOmpExecutablePath: vi.fn(),
     resolveSessionFilePath: vi.fn(),
-    resolveOmpPaneSessionIdentity: vi.fn()
+    resolveOmpPaneSessionIdentity: vi.fn(),
+    tryGetProviderForPty: vi.fn()
   }
 })
 
@@ -39,6 +42,11 @@ vi.mock('../omp-rpc/omp-rpc-chat-session-registry', () => ({
 vi.mock('./omp-rpc', () => ({ resolveOmpExecutablePath }))
 vi.mock('../native-chat/session-file-resolver', () => ({ resolveSessionFilePath }))
 vi.mock('../native-chat/omp-terminal-session-identity', () => ({ resolveOmpPaneSessionIdentity }))
+// Why: no real PTY provider is ever registered for a bare 'pty-N' test id —
+// the resolveSessionIdentity locality gate (finding E) would otherwise
+// reject every test call as "not local" regardless of intent. Defaults
+// truthy in beforeEach; the dedicated locality-gate test overrides it.
+vi.mock('./pty/provider/registry', () => ({ tryGetProviderForPty }))
 
 import { clearOmpRpcChatHandlersForTests, registerOmpRpcChatHandlers } from './omp-rpc-chat'
 
@@ -65,6 +73,7 @@ describe('OMP RPC chat IPC handlers', () => {
     resolveOmpExecutablePath.mockResolvedValue('/usr/local/bin/omp')
     resolveSessionFilePath.mockResolvedValue('/sessions/a.jsonl')
     resolveOmpPaneSessionIdentity.mockResolvedValue(null)
+    tryGetProviderForPty.mockReturnValue({})
   })
 
   it('registers resolveSessionIdentity/acquire/release/send/abort/respond and the subscribe push channels', () => {
@@ -96,8 +105,23 @@ describe('OMP RPC chat IPC handlers', () => {
     ).resolves.toEqual({ sessionId: 'session-1', source: 'breadcrumb' })
     expect(resolveOmpPaneSessionIdentity).toHaveBeenCalledWith(
       { ptyId: 'pty-1', cwd: '/work' },
-      expect.objectContaining({ getSlavePath: expect.any(Function) })
+      expect.objectContaining({
+        getSlavePath: expect.any(Function),
+        claimedSessionFilePaths: expect.any(Set)
+      })
     )
+  })
+
+  // Finding E (cross-lab review, wave 5): the mtime-fallback sub-path has
+  // no independent locality gate of its own — verify it here rather than
+  // trust the renderer's own `runtimeEnvironmentId === null` gate alone.
+  it('resolveSessionIdentity fails closed to null for a non-local ptyId without resolving', async () => {
+    tryGetProviderForPty.mockReturnValue(undefined)
+    registerOmpRpcChatHandlers()
+    await expect(
+      invoke('ompRpcChat:resolveSessionIdentity', { ptyId: 'pty-1', cwd: '/work' })
+    ).resolves.toBeNull()
+    expect(resolveOmpPaneSessionIdentity).not.toHaveBeenCalled()
   })
 
   it('resolveSessionIdentity returns null on missing args without resolving', async () => {
@@ -240,6 +264,65 @@ describe('OMP RPC chat IPC handlers', () => {
       released: true
     })
     expect(registryInstance.release).toHaveBeenCalledWith('tab:leaf')
+  })
+
+  // Critical B (cross-lab review, wave 5): only a release that genuinely
+  // settled and exited hands the pane back — the push carries the exact
+  // respawn context the renderer supplied, unmodified.
+  it('pushes a handback event to the requesting sender when a respawn-intent release settles', async () => {
+    registryInstance.release.mockResolvedValue({ released: true })
+    registerOmpRpcChatHandlers()
+    const send = vi.fn()
+    const sender = { isDestroyed: () => false, send }
+    await expect(
+      handle.mock.calls.find(([channel]) => channel === 'ompRpcChat:release')?.[1](
+        { sender },
+        {
+          paneKey: 'tab:leaf',
+          respawn: { replacedPtyId: 'pty-1', cwd: '/work', sessionId: 'session-1' }
+        }
+      )
+    ).resolves.toEqual({ released: true })
+    expect(send).toHaveBeenCalledWith('ompRpcChat:handback', {
+      paneKey: 'tab:leaf',
+      replacedPtyId: 'pty-1',
+      cwd: '/work',
+      sessionId: 'session-1'
+    })
+  })
+
+  it('never pushes a handback event when the release fails closed (keeps the claim)', async () => {
+    registryInstance.release.mockResolvedValue({ released: false })
+    registerOmpRpcChatHandlers()
+    const send = vi.fn()
+    const sender = { isDestroyed: () => false, send }
+    await expect(
+      handle.mock.calls.find(([channel]) => channel === 'ompRpcChat:release')?.[1](
+        { sender },
+        {
+          paneKey: 'tab:leaf',
+          respawn: { replacedPtyId: 'pty-1', cwd: '/work', sessionId: 'session-1' }
+        }
+      )
+    ).resolves.toEqual({ released: false })
+    expect(send).not.toHaveBeenCalled()
+  })
+
+  it('does not throw when the requesting sender was already destroyed by the time release settles', async () => {
+    registryInstance.release.mockResolvedValue({ released: true })
+    registerOmpRpcChatHandlers()
+    const send = vi.fn()
+    const sender = { isDestroyed: () => true, send }
+    await expect(
+      handle.mock.calls.find(([channel]) => channel === 'ompRpcChat:release')?.[1](
+        { sender },
+        {
+          paneKey: 'tab:leaf',
+          respawn: { replacedPtyId: 'pty-1', cwd: '/work', sessionId: 'session-1' }
+        }
+      )
+    ).resolves.toEqual({ released: true })
+    expect(send).not.toHaveBeenCalled()
   })
 
   it('forwards session events to the subscribing sender only for its subscriptionId', () => {
