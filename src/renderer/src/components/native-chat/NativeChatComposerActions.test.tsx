@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { cleanup, render, screen } from '@testing-library/react'
+import { cleanup, fireEvent, render, screen } from '@testing-library/react'
 import type { ReactNode } from 'react'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -58,5 +58,51 @@ describe('NativeChatComposerActions', () => {
     const pickers = screen.getByTestId('session-option-pickers')
     const dictation = screen.getByRole('button', { name: 'Start dictation' })
     expect(pickers.nextElementSibling).toBe(dictation)
+  })
+
+  it('hides the follow-up toggle when omitted, and toggles it when provided', () => {
+    const onToggle = vi.fn()
+    const { rerender } = render(
+      <NativeChatComposerActions
+        attachDisabled={false}
+        dictationDisabled={false}
+        sendDisabled={false}
+        isWorking
+        isDictating={false}
+        isDictationHoldMode={false}
+        onAttach={vi.fn()}
+        onDictationToggle={vi.fn()}
+        onDictationHoldStart={vi.fn()}
+        onDictationHoldEnd={vi.fn()}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        sessionOptionsSurface={null}
+        sessionOptionsSnapshot={[]}
+      />
+    )
+    expect(screen.queryByRole('button', { name: 'Follow up' })).toBeNull()
+
+    rerender(
+      <NativeChatComposerActions
+        attachDisabled={false}
+        dictationDisabled={false}
+        sendDisabled={false}
+        isWorking
+        isDictating={false}
+        isDictationHoldMode={false}
+        onAttach={vi.fn()}
+        onDictationToggle={vi.fn()}
+        onDictationHoldStart={vi.fn()}
+        onDictationHoldEnd={vi.fn()}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        sessionOptionsSurface={null}
+        sessionOptionsSnapshot={[]}
+        followUp={{ active: false, onToggle }}
+      />
+    )
+    const followUpButton = screen.getByRole('button', { name: 'Follow up' })
+    fireEvent.click(followUpButton)
+    expect(onToggle).toHaveBeenCalledTimes(1)
   })
 })

@@ -54,6 +54,7 @@ export type NativeChatComposerFieldProps = {
   onStop?: () => void
   sessionOptionsSurface: SessionOptionsSurface | null
   sessionOptionsSnapshot: SessionOptionDescriptor[]
+  followUp?: { active: boolean; onToggle: () => void } | null
 }
 
 export type NativeChatComposerImageAttachment = {
@@ -95,7 +96,8 @@ export function NativeChatComposerField({
   onSend,
   onStop,
   sessionOptionsSurface,
-  sessionOptionsSnapshot
+  sessionOptionsSnapshot,
+  followUp = null
 }: NativeChatComposerFieldProps): React.JSX.Element {
   return (
     <div className="shrink-0 bg-background">
@@ -213,6 +215,7 @@ export function NativeChatComposerField({
                 onStop={onStop}
                 sessionOptionsSurface={sessionOptionsSurface}
                 sessionOptionsSnapshot={sessionOptionsSnapshot}
+                followUp={followUp}
               />
             </div>
           </div>

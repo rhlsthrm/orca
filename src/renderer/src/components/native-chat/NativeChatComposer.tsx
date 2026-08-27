@@ -2,29 +2,19 @@ import { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, useState
 import { useAppStore } from '../../store'
 import { sendRuntimePtyInput } from '@/runtime/runtime-terminal-inspection'
 import { getSettingsForAgentTabRuntimeOwner } from '@/lib/agent-paste-draft'
-import {
-  sendNativeChatMessage,
-  sendNativeChatTypedCommand,
-  sendNativeChatMessageWithImageAttachments,
-  submitNativeChatPrompt
-} from './native-chat-runtime-send'
-import type { NativeChatSendHandle } from './native-chat-runtime-send'
-import { resolveNativeChatLaunchDraftSend } from './native-chat-launch-draft-send'
 import { getVerifiedNativeChatCommands } from '../../../../shared/native-chat-agent-profiles'
 import { useOmpRpcCommands, useOmpRpcProbeCwd } from './use-omp-rpc-commands'
 import { useOmpRpcLocalCommandSend } from './use-omp-rpc-local-command-send'
 import { useNativeChatComposerTextEditing } from './use-native-chat-composer-text-editing'
-import { isSlashCommandDraft } from '../../../../shared/native-chat-slash-commands'
-import { emitNativeChatMessageSent } from '@/lib/native-chat-telemetry'
-import { EMPTY_HISTORY, pushHistory, type HistoryState } from './native-chat-composer-state'
+import { translate } from '@/i18n/i18n'
+import { useNativeChatComposerOmpRpcSend } from './use-native-chat-composer-omp-rpc-send'
+import { useNativeChatComposerSend } from './use-native-chat-composer-send'
+import { EMPTY_HISTORY, type HistoryState } from './native-chat-composer-state'
 import { readNativeChatDraftCache } from './native-chat-draft-cache'
 import { useNativeChatDraft } from './use-native-chat-draft'
 import { useNativeChatLaunchDraftAdoption } from './use-native-chat-launch-draft-adoption'
 import { NativeChatComposerField } from './NativeChatComposerField'
-import {
-  nativeChatComposerTargetIsRemote,
-  type NativeChatResolvedTarget
-} from './native-chat-composer-target'
+import type { NativeChatResolvedTarget } from './native-chat-composer-target'
 import { useNativeChatComposerAttachments } from './use-native-chat-composer-attachments'
 import { useNativeChatComposerPaste } from './use-native-chat-composer-paste'
 import { useNativeChatExternalAttachments } from './use-native-chat-external-attachments'
@@ -39,11 +29,13 @@ import { useNativeChatPickerCommandDispatch } from './use-native-chat-picker-com
 import { useNativeChatTypedInsertion } from './use-native-chat-typed-insertion'
 import type {
   NativeChatComposerHandle,
+  NativeChatComposerOmpRpcBinding,
   NativeChatComposerProps
 } from './native-chat-composer-types'
 
 export type {
   NativeChatComposerHandle,
+  NativeChatComposerOmpRpcBinding,
   NativeChatComposerProps
 } from './native-chat-composer-types'
 
@@ -52,6 +44,14 @@ export type {
 // inference (agent-interrupt-intent.ts) is driven by the existing PTY input
 // observers, so writing ESC through the same send path feeds that machinery.
 const ESC = '\x1b'
+
+// Why: a stable module-level fallback so an unset `ompRpcChat` prop never
+// re-creates a fresh object (and a fresh `send` identity) on every render.
+const OMP_RPC_CHAT_DISABLED: NativeChatComposerOmpRpcBinding = {
+  isOwned: false,
+  isTurnWorking: false,
+  send: () => Promise.resolve({ ok: false, reason: 'not-available' })
+}
 
 /**
  * Rich native input for the chat view. Sends prompts into the running agent
@@ -77,7 +77,8 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       onSwitchToTerminal,
       readTerminalScreen,
       launchDraft,
-      launchDraftResolved = false
+      launchDraftResolved = false,
+      ompRpcChat = OMP_RPC_CHAT_DISABLED
     },
     ref
   ): React.JSX.Element {
@@ -250,98 +251,21 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       onSlashCommand
     })
 
-    const send = useCallback(() => {
-      const text = draft
-      const imagePaths = imageAttachments.map((attachment) => attachment.path)
-      if ((text.trim() === '' && imagePaths.length === 0) || disabled) {
-        return
-      }
-      // Why: block a normal send while a session-option command (e.g. /model) is
-      // still writing its body+delayed-Enter to the same pty, so the two write
-      // sequences can't interleave on one input line.
-      if (isDispatchingSessionOption) {
-        return
-      }
-      const target = resolveTarget()
-      if (!target) {
-        return
-      }
-      // Why: `/usage` is a LOCAL command — running it over RPC returns its output
-      // to render here instead of leaving it only on the TUI screen. Every other
-      // command (and a failed probe) keeps the PTY path below untouched.
-      if (sendOmpLocalCommand(text)) {
-        setHistory((prev) => pushHistory(prev, text))
-        setDraft('')
-        setCaret(0)
-        clearSkillOrigin()
-        setNotice(null)
-        return
-      }
-      const classification = classifySend(text)
-      // A parked launch draft must be cleared line-by-line before the body.
-      const { sendOptions } = resolveNativeChatLaunchDraftSend({
-        launchDraft,
-        launchDraftResolved,
-        agent,
-        readScreen: () => readTerminalScreen?.()
-      })
-      let pendingHandle: NativeChatSendHandle | null = null
-      // Why: image attachments take the attachment send path even for a
-      // command/unknown send, otherwise `clearImageAttachments()` below drops
-      // them silently when the text starts with the agent's slash/skill prefix.
-      if (classification !== 'chat' && imagePaths.length === 0) {
-        pendingHandle =
-          agent === 'codex' && isSlashCommandDraft(text)
-            ? sendNativeChatTypedCommand(target.settings, target.ptyId, text)
-            : sendNativeChatMessage(target.settings, target.ptyId, text, sendOptions)
-      } else if (imagePaths.length > 0) {
-        pendingHandle = sendNativeChatMessageWithImageAttachments(
-          target.settings,
-          target.ptyId,
-          text,
-          imagePaths,
-          sendOptions
+    const { sendOmpRpcChat, followUp } = useNativeChatComposerOmpRpcSend({
+      ompRpcChat,
+      onOptimisticSend,
+      onSendFailed: () =>
+        setNotice(
+          translate(
+            'components.native-chat.composer.ompRpcSendFailed',
+            'Message could not be sent to the agent.'
+          )
         )
-      } else if (text.trim().length > 0) {
-        pendingHandle = sendNativeChatMessage(target.settings, target.ptyId, text, sendOptions)
-      } else {
-        submitNativeChatPrompt(target.settings, target.ptyId)
-      }
-      if (classification !== 'chat') {
-        if (pendingHandle) {
-          trackPendingSend(pendingHandle)
-        }
-        // Why: only verified catalog commands can truthfully claim they ran or
-        // mutate session-option state; unknown slash-like text has no such proof.
-        if (classification === 'command') {
-          onSlashCommand?.(text.trim())
-          sessionOptionsSurface?.recordOutgoingCommand(text.trim())
-        }
-      } else {
-        const pendingId = onOptimisticSend?.(text, imagePaths)
-        if (pendingHandle) {
-          trackPendingSend(pendingHandle, pendingId)
-        }
-      }
-      // Why: U10 telemetry — record adoption + local-vs-remote runtime split. The
-      // agent prop is the loose AgentType; the emitter narrows unknowns to 'other'.
-      emitNativeChatMessageSent({
-        agent,
-        runtime: nativeChatComposerTargetIsRemote(target.ptyId) ? 'remote' : 'local'
-      })
-      setHistory((prev) => pushHistory(prev, text))
-      setDraft('')
-      setCaret(0)
-      clearSkillOrigin()
-      clearImageAttachments()
-      setNotice(null)
-      // The send cleared the TUI input line before its body, so retire the seed.
-      useAppStore.getState().clearNativeChatLaunchDraft(terminalTabId)
-    }, [
+    })
+
+    const send = useNativeChatComposerSend({
       agent,
-      classifySend,
-      clearSkillOrigin,
-      clearImageAttachments,
+      terminalTabId,
       draft,
       imageAttachments,
       disabled,
@@ -350,14 +274,20 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       launchDraftResolved,
       readTerminalScreen,
       resolveTarget,
-      onOptimisticSend,
-      onSlashCommand,
+      classifySend,
       sendOmpLocalCommand,
+      sendOmpRpcChat,
+      onSlashCommand,
+      onOptimisticSend,
       sessionOptionsSurface,
-      terminalTabId,
       trackPendingSend,
-      setDraft
-    ])
+      setHistory,
+      setDraft,
+      setCaret,
+      clearSkillOrigin,
+      clearImageAttachments,
+      setNotice
+    })
 
     const interrupt = useCallback(() => {
       cancelPendingSends()
@@ -406,7 +336,6 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       setCaret,
       setHistory
     })
-
     return (
       <NativeChatComposerField
         textareaRef={textareaRef}
@@ -443,6 +372,7 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
         onStop={interrupt}
         sessionOptionsSurface={sessionOptionsSurface}
         sessionOptionsSnapshot={sessionOptionsSnapshot}
+        followUp={followUp}
       />
     )
   }

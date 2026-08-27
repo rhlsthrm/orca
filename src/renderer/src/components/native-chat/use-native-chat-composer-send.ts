@@ -1,0 +1,213 @@
+// The composer's Send dispatch, extracted from NativeChatComposer.tsx to stay
+// under the file's line ratchet (wave 1 hit the same cap and split similarly).
+// Pure relocation of the existing PTY-classification dispatch plus the new
+// RPC-chat routing branch (W2-4) — no behavior change to the moved code.
+
+import { useCallback } from 'react'
+import { useAppStore } from '../../store'
+import type { AgentType } from '../../../../shared/agent-status-types'
+import {
+  isSlashCommandDraft,
+  type NativeChatSendClassification
+} from '../../../../shared/native-chat-slash-commands'
+import type { NativeChatPtySessionOptionsSurface } from './native-chat-pty-session-options'
+import type { NativeChatLaunchDraft } from '@/lib/native-chat-launch-prompt'
+import { emitNativeChatMessageSent } from '@/lib/native-chat-telemetry'
+import {
+  sendNativeChatMessage,
+  sendNativeChatTypedCommand,
+  sendNativeChatMessageWithImageAttachments,
+  submitNativeChatPrompt,
+  type NativeChatSendHandle
+} from './native-chat-runtime-send'
+import { resolveNativeChatLaunchDraftSend } from './native-chat-launch-draft-send'
+import {
+  nativeChatComposerTargetIsRemote,
+  type NativeChatResolvedTarget
+} from './native-chat-composer-target'
+import { pushHistory, type HistoryState } from './native-chat-composer-state'
+import type { NativeChatCommandMarkerOutcome } from './native-chat-command-marker'
+import type { NativeChatComposerImageAttachment } from './NativeChatComposerField'
+
+export type UseNativeChatComposerSendArgs = {
+  agent: AgentType
+  terminalTabId: string
+  draft: string
+  imageAttachments: readonly NativeChatComposerImageAttachment[]
+  disabled: boolean
+  isDispatchingSessionOption: boolean
+  launchDraft?: NativeChatLaunchDraft | null
+  launchDraftResolved: boolean
+  readTerminalScreen?: () => string | null
+  resolveTarget: () => NativeChatResolvedTarget | null
+  classifySend: (text: string) => NativeChatSendClassification
+  /** `/usage`-style local commands run over the session-less RPC probe. */
+  sendOmpLocalCommand: (text: string) => boolean
+  /** A plain chat prompt routed through the pane's RPC-owned session (D1/D6). */
+  sendOmpRpcChat: (text: string) => boolean
+  onSlashCommand?: (command: string, outcome?: NativeChatCommandMarkerOutcome) => void
+  onOptimisticSend?: (text: string, imagePaths?: string[]) => string | undefined
+  sessionOptionsSurface: NativeChatPtySessionOptionsSurface | null
+  trackPendingSend: (handle: NativeChatSendHandle, pendingId?: string) => void
+  setHistory: (updater: (prev: HistoryState) => HistoryState) => void
+  setDraft: (value: string) => void
+  setCaret: (value: number) => void
+  clearSkillOrigin: () => void
+  clearImageAttachments: () => void
+  setNotice: (value: string | null) => void
+}
+
+export function useNativeChatComposerSend(args: UseNativeChatComposerSendArgs): () => void {
+  const {
+    agent,
+    terminalTabId,
+    draft,
+    imageAttachments,
+    disabled,
+    isDispatchingSessionOption,
+    launchDraft,
+    launchDraftResolved,
+    readTerminalScreen,
+    resolveTarget,
+    classifySend,
+    sendOmpLocalCommand,
+    sendOmpRpcChat,
+    onSlashCommand,
+    onOptimisticSend,
+    sessionOptionsSurface,
+    trackPendingSend,
+    setHistory,
+    setDraft,
+    setCaret,
+    clearSkillOrigin,
+    clearImageAttachments,
+    setNotice
+  } = args
+
+  return useCallback(() => {
+    const text = draft
+    const imagePaths = imageAttachments.map((attachment) => attachment.path)
+    if ((text.trim() === '' && imagePaths.length === 0) || disabled) {
+      return
+    }
+    // Why: block a normal send while a session-option command (e.g. /model) is
+    // still writing its body+delayed-Enter to the same pty, so the two write
+    // sequences can't interleave on one input line.
+    if (isDispatchingSessionOption) {
+      return
+    }
+    const target = resolveTarget()
+    if (!target) {
+      return
+    }
+    // Why: `/usage` is a LOCAL command — running it over RPC returns its output
+    // to render here instead of leaving it only on the TUI screen. Every other
+    // command (and a failed probe) keeps the PTY path below untouched.
+    if (sendOmpLocalCommand(text)) {
+      setHistory((prev) => pushHistory(prev, text))
+      setDraft('')
+      setCaret(0)
+      clearSkillOrigin()
+      setNotice(null)
+      return
+    }
+    const classification = classifySend(text)
+    // Why: route a plain chat prompt through the RPC session that owns this
+    // pane before any PTY fallback (D1/D6); text-only, since there is no RPC
+    // image UI this wave — an attachment always keeps the PTY path.
+    if (classification === 'chat' && imagePaths.length === 0 && sendOmpRpcChat(text)) {
+      emitNativeChatMessageSent({ agent, runtime: 'local' })
+      setHistory((prev) => pushHistory(prev, text))
+      setDraft('')
+      setCaret(0)
+      clearSkillOrigin()
+      clearImageAttachments()
+      setNotice(null)
+      useAppStore.getState().clearNativeChatLaunchDraft(terminalTabId)
+      return
+    }
+    // A parked launch draft must be cleared line-by-line before the body.
+    const { sendOptions } = resolveNativeChatLaunchDraftSend({
+      launchDraft,
+      launchDraftResolved,
+      agent,
+      readScreen: () => readTerminalScreen?.()
+    })
+    let pendingHandle: NativeChatSendHandle | null = null
+    // Why: image attachments take the attachment send path even for a
+    // command/unknown send, otherwise `clearImageAttachments()` below drops
+    // them silently when the text starts with the agent's slash/skill prefix.
+    if (classification !== 'chat' && imagePaths.length === 0) {
+      pendingHandle =
+        agent === 'codex' && isSlashCommandDraft(text)
+          ? sendNativeChatTypedCommand(target.settings, target.ptyId, text)
+          : sendNativeChatMessage(target.settings, target.ptyId, text, sendOptions)
+    } else if (imagePaths.length > 0) {
+      pendingHandle = sendNativeChatMessageWithImageAttachments(
+        target.settings,
+        target.ptyId,
+        text,
+        imagePaths,
+        sendOptions
+      )
+    } else if (text.trim().length > 0) {
+      pendingHandle = sendNativeChatMessage(target.settings, target.ptyId, text, sendOptions)
+    } else {
+      submitNativeChatPrompt(target.settings, target.ptyId)
+    }
+    if (classification !== 'chat') {
+      if (pendingHandle) {
+        trackPendingSend(pendingHandle)
+      }
+      // Why: only verified catalog commands can truthfully claim they ran or
+      // mutate session-option state; unknown slash-like text has no such proof.
+      if (classification === 'command') {
+        onSlashCommand?.(text.trim())
+        sessionOptionsSurface?.recordOutgoingCommand(text.trim())
+      }
+    } else {
+      const pendingId = onOptimisticSend?.(text, imagePaths)
+      if (pendingHandle) {
+        trackPendingSend(pendingHandle, pendingId)
+      }
+    }
+    // Why: U10 telemetry — record adoption + local-vs-remote runtime split. The
+    // agent prop is the loose AgentType; the emitter narrows unknowns to 'other'.
+    emitNativeChatMessageSent({
+      agent,
+      runtime: nativeChatComposerTargetIsRemote(target.ptyId) ? 'remote' : 'local'
+    })
+    setHistory((prev) => pushHistory(prev, text))
+    setDraft('')
+    setCaret(0)
+    clearSkillOrigin()
+    clearImageAttachments()
+    setNotice(null)
+    // The send cleared the TUI input line before its body, so retire the seed.
+    useAppStore.getState().clearNativeChatLaunchDraft(terminalTabId)
+  }, [
+    agent,
+    clearSkillOrigin,
+    clearImageAttachments,
+    draft,
+    imageAttachments,
+    disabled,
+    isDispatchingSessionOption,
+    launchDraft,
+    launchDraftResolved,
+    readTerminalScreen,
+    resolveTarget,
+    classifySend,
+    onOptimisticSend,
+    onSlashCommand,
+    sendOmpLocalCommand,
+    sendOmpRpcChat,
+    sessionOptionsSurface,
+    terminalTabId,
+    trackPendingSend,
+    setDraft,
+    setHistory,
+    setCaret,
+    setNotice
+  ])
+}

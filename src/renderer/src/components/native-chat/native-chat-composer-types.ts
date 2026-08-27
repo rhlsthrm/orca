@@ -1,6 +1,21 @@
 import type { AgentType } from '../../../../shared/agent-status-types'
+import type {
+  OmpRpcChatSendBehavior,
+  OmpRpcChatSendResult
+} from '../../../../shared/omp-rpc-chat-ipc-contract'
 import type { NativeChatLaunchDraft } from '@/lib/native-chat-launch-prompt'
 import type { NativeChatCommandMarkerOutcome } from './native-chat-command-marker'
+
+/** The slice of a pane's RPC chat session the composer needs to route a send
+ *  through it (D6). `isOwned:false` keeps every send on the PTY path. */
+export type NativeChatComposerOmpRpcBinding = {
+  isOwned: boolean
+  isTurnWorking: boolean
+  send: (args: {
+    message: string
+    behavior: OmpRpcChatSendBehavior
+  }) => Promise<OmpRpcChatSendResult>
+}
 
 export type NativeChatComposerProps = {
   /** Tab hosting the agent; used to resolve the live ptyId + runtime settings. */
@@ -32,6 +47,9 @@ export type NativeChatComposerProps = {
   launchDraft?: NativeChatLaunchDraft | null
   /** True once the transcript shows the TUI-side draft was submitted or cleared. */
   launchDraftResolved?: boolean
+  /** RPC-owned session binding for this pane (W2-4); omitted keeps every send
+   *  on today's PTY keystroke path unchanged. */
+  ompRpcChat?: NativeChatComposerOmpRpcBinding
 }
 
 export type NativeChatComposerHandle = {

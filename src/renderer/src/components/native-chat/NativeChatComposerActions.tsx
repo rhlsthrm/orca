@@ -23,6 +23,9 @@ export type NativeChatComposerActionsProps = {
   onStop?: () => void
   sessionOptionsSurface: SessionOptionsSurface | null
   sessionOptionsSnapshot: SessionOptionDescriptor[]
+  /** RPC "Follow up" affordance (D6/W2-5): present only while an RPC-owned
+   *  pane's turn is streaming; null hides the toggle entirely. */
+  followUp?: { active: boolean; onToggle: () => void } | null
 }
 
 export function NativeChatComposerActions({
@@ -39,7 +42,8 @@ export function NativeChatComposerActions({
   onSend,
   onStop,
   sessionOptionsSurface,
-  sessionOptionsSnapshot
+  sessionOptionsSnapshot,
+  followUp = null
 }: NativeChatComposerActionsProps): React.JSX.Element {
   const dictationLabel = isDictating
     ? translate('components.native-chat.composer.stopDictation', 'Stop dictation')
@@ -118,6 +122,17 @@ export function NativeChatComposerActions({
             {dictationLabel}
           </TooltipContent>
         </Tooltip>
+        {followUp ? (
+          <Button
+            type="button"
+            variant={followUp.active ? 'secondary' : 'ghost'}
+            size="sm"
+            aria-pressed={followUp.active}
+            onClick={followUp.onToggle}
+          >
+            {translate('components.native-chat.composer.followUp', 'Follow up')}
+          </Button>
+        ) : null}
         <Button
           type="button"
           aria-label={
