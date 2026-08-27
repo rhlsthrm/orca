@@ -65,6 +65,7 @@ const {
   registerLocalhostWorktreeLabelHandlersMock,
   registerNativeChatHandlersMock,
   registerOmpRpcHandlersMock,
+  registerOmpRpcChatHandlersMock,
   registerEmulatorFrameStreamHandlersMock,
   registerEmulatorVideoStreamHandlersMock
 } = vi.hoisted(() => ({
@@ -132,6 +133,7 @@ const {
   registerLocalhostWorktreeLabelHandlersMock: vi.fn(),
   registerNativeChatHandlersMock: vi.fn(),
   registerOmpRpcHandlersMock: vi.fn(),
+  registerOmpRpcChatHandlersMock: vi.fn(),
   registerEmulatorFrameStreamHandlersMock: vi.fn(),
   registerEmulatorVideoStreamHandlersMock: vi.fn()
 }))
@@ -391,6 +393,10 @@ vi.mock('../native-chat', () => ({
 
 vi.mock('../omp-rpc', () => ({
   registerOmpRpcHandlers: registerOmpRpcHandlersMock
+}))
+
+vi.mock('../omp-rpc-chat', () => ({
+  registerOmpRpcChatHandlers: registerOmpRpcChatHandlersMock
 }))
 
 import { registerCoreHandlers } from './register-core-handlers'
