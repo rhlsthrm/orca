@@ -46,6 +46,12 @@ This document records only decisions and live-probe facts that code does not car
 | `640cfbc49` | **Wave 4.** `omp-rpc-chat-handback.ts` — `respawnPtyForOmpRpcChatHandback` spawns `omp --resume <id>` (existing `buildAgentResumeStartupPlan` resume path) and rebinds it into the exact pane that released RPC ownership, replacing the old ptyId, reusing the same store primitives `codex-detached-pane-restart.ts`'s in-place respawn uses |
 | `2921d8437` | **Wave 4.** `use-omp-pane-session-identity.ts` resolves via the new IPC once a pane is visible (F9-style latch); wired into `NativeChatView.tsx` in place of the hook-derived `sessionId` feeding the RPC integration |
 | `035522c5c` | **Wave 4.** Decision 1: `use-omp-rpc-chat-session.ts` kills the pane's live PTY before acquiring instead of only ever finding one already exited, and a new deferred, settle-gated hand-back effect (separate from the acquire effect, so F9 holds unchanged for it) releases + respawns once any in-flight turn settles, canceling if the pane returns to Chat view first |
+| `8747bdbcb` | **Wave 5.** Shared IPC contract: `OmpRpcChatReleaseArgs.respawn` (hand-back intent) and the new `ompRpcChat:handback` push payload |
+| `c044f34af` | **Wave 5.** Critical A fix: `killPtyBeforeOmpRpcAcquire` suppresses the pty exit (armed, not self-consumed) and proactively clears the tab's pty binding before killing. Critical B fix (renderer half): the unreachable settle-gated hand-back effect is removed; the acquire effect's cleanup/cancelled-before-acquired paths express hand-back intent via `release({ respawn })` and return immediately |
+| `0eeed8186` | **Wave 5.** `handoffToPty`'s abort-on-streaming becomes an explicit opt-in (`allowAbort`, default false/unset) — no caller sets it true; default behavior waits (bounded) for a streaming turn to settle and fails closed if it doesn't |
+| `393e51f7a` | **Wave 5.** `performRelease` only tears down and reports `released:true` on `handoffToPty`'s `'exited'` path — any other result fails closed (`released:false`), keeping the claim. Registry also tracks each pane's claimed session file path, exposed via `claimedSessionFilePaths()` (finding C's exclusion set) |
+| `5b9cc9bee` | **Wave 5.** `omp-terminal-session-identity.ts` hardening: cwd normalization (realpath + trailing-slash strip, finding D) before breadcrumb/bucket comparison; `claimedSessionFilePaths` excludes another live pane's session from the mtime fallback (finding C) |
+| `ab67e6711` | **Wave 5.** `ompRpcChat:release` pushes `ompRpcChat:handback` to the requesting sender once a respawn-intent release genuinely settles+exits; `use-omp-rpc-chat-handback-listener.ts`, wired into `TerminalPane` (stays mounted underneath `NativeChatView` through a "leave Chat view" unmount), performs the actual PTY respawn via the unchanged `respawnPtyForOmpRpcChatHandback`. Also wires finding E (`resolveSessionIdentity` verifies pty locality before scanning local disk) and finding C's exclusion set |
 
 Note: commits are listed in dependency order, not `git log` order.
 
@@ -125,20 +131,56 @@ Note: commits are listed in dependency order, not `git log` order.
   is therefore the *claim identity*, and the session-file path used for `switch_session` is
   resolved from it at the IPC boundary. Do not pass the id to `switch_session`; see the
   live-probed fact above for why that fails silently.
-- **Decision 1 (wave 4) — kill-and-resume on first chat use.** Chat-view activation for
-  an OMP pane acquires the session by killing the pane's PTY (`pty.kill(ptyId,
-  {keepHistory:true})`, single-PTY granularity, best-effort — the registry's existing
-  liveness/exit-proof gate is the real proof) and resuming that same session in the RPC
-  child, holding RPC ownership for the pane's life. Returning to Terminal view releases
-  and respawns a PTY resuming the same session (`omp --resume <id>`) into the exact same
-  pane. Reconciled with F9 (wave 3's "a visibility toggle never releases/aborts a live
-  turn") as a *separate* effect from acquire/release: F9's rule holds unchanged for that
-  effect, and the new hand-back effect defers past an initial tick (so a same-tick flip
-  back to Chat view is a pure no-op) then polls until any in-flight turn settles before
-  acting — never an abort-and-release. A respawned pty is a fresh acquire identity
-  (`ptyId` changed), so the F9 visibility latch resets for it and RPC does not re-engage
-  on it until the user actually returns to Chat view again.
-- **Decision 2 (wave 4) — bypass the broken hook, resolve from OMP's own on-disk
+- **Decision 1 (wave 4, amended wave 5) — kill-and-resume on first chat use.**
+  Chat-view activation for an OMP pane acquires the session by killing the pane's
+  PTY (`pty.kill(ptyId, {keepHistory:true})`, single-PTY granularity, best-effort
+  — the registry's existing liveness/exit-proof gate is the real proof) and
+  resuming that same session in the RPC child, holding RPC ownership for the
+  pane's life. Killing suppresses the exit first (`suppressPtyExit`, left armed
+  — wave 5, Critical A) and proactively clears the tab's pty binding to a
+  well-defined "RPC-owned, no PTY" state, rather than leaving an unsuppressed
+  exit to route through the same teardown a genuine crash would (it closed the
+  whole tab for the common single-pane case).
+  **Wave 5 replaced the wave-4 hand-back design.** The original design used a
+  second, `isVisible`-gated effect deferring past a tick then polling
+  `turnState` indefinitely for settlement, reconciled with F9 as a separate
+  effect from acquire/release. A cross-lab review found this effect is
+  *unreachable*: the real "leave Chat view" trigger (`TerminalPane.tsx`'s
+  portal render gate returning null) unmounts the whole hook, which `isVisible`
+  flipping while mounted does not model — `rerender()` in the wave-4 tests
+  modeled the wrong transition and is why they passed against the broken
+  trigger (see the Traps entry below). The actual trigger — the *first*
+  effect's unconditional cleanup — released through `handoffToPty`'s then-
+  unconditional abort, so a mere view toggle silently aborted a live turn, the
+  exact outcome F9 forbids, and never respawned a PTY at all.
+  **Hand-back ownership now lives in main, not the renderer hook.** The acquire
+  effect's cleanup (and its cancelled-before-acquired race) express intent via
+  `release({ paneKey, respawn: { replacedPtyId, cwd, sessionId } })` and return
+  immediately — no polling, no settle-wait, in the renderer. Main's
+  `handoffToPty` gates aborting behind an explicit, unused-by-default
+  `allowAbort` opt-in (default: never abort; wait, bounded, for the turn to
+  settle on its own; fail closed to `unverifiable` — keeping the claim — if it
+  doesn't) and `performRelease` only tears down on the proven `'exited'`
+  result. Only once release genuinely settles+exits does main push
+  `ompRpcChat:handback` to the renderer; `use-omp-rpc-chat-handback-listener.ts`,
+  subscribed once by `TerminalPane` (which stays mounted underneath
+  `NativeChatView` through the very unmount that triggers hand-back), performs
+  the actual `pty.spawn` + rebind via the unchanged
+  `respawnPtyForOmpRpcChatHandback`. A respawned pty is still a fresh acquire
+  identity (`ptyId` changed), so the F9 visibility latch still resets for it.
+  **Known limitation, not fixed this wave:** if a turn never settles within
+  `handoffToPty`'s bounded wait (`OMP_RPC_SETTLE_TIMEOUT_MS`, currently tuned
+  for the settle-then-exit-proof sequence generally, not specifically for
+  "user left Chat view mid-turn"), the release fails closed and nothing retries
+  it — the pane is left with neither a live PTY nor a respawned one until the
+  user returns to Chat view (which re-attaches to the still-running session,
+  since `acquire()` finds and reuses it) or the process is otherwise handled.
+  This trades a possibly-long "no terminal" window for never silently killing
+  live work — deliberately, per the brief that drove this wave — but a
+  durable retry-until-settled loop (mirroring the old effect's indefinite
+  poll, just hosted where it can survive the unmount) is future work if that
+  window proves too disruptive in UAT.
+- **Decision 2 (wave 4, hardened wave 5) — bypass the broken hook, resolve from OMP's own on-disk
   state.** Rather than wait on open item 2's hook-delivery fix, the pane's OMP session
   identity is resolved directly from `~/.omp/agent/terminal-sessions/<terminal-id>`
   (preferred) or the newest-by-mtime file in the pane's encoded-cwd session bucket
@@ -152,6 +194,15 @@ Note: commits are listed in dependency order, not `git log` order.
   delivery to the renderer) remains open and still blocks the *transcript-reading* path
   for a PTY-hosted (non-RPC-owned) OMP pane — a separate, still-broken concern this wave
   did not touch.
+  **Wave 5 hardening (secondary review findings C/D/E, all Medium/Low, none exploitable):**
+  the breadcrumb cwd comparison and cwd-bucket encoding now normalize both sides (realpath
+  + trailing-slash strip) before comparing, so a symlinked worktree or a trailing slash no
+  longer reads as stale-tty mismatch (finding D); the mtime fallback excludes session files
+  another live pane already claimed via a new `claimedSessionFilePaths` option, so two panes
+  sharing a cwd can no longer both resolve to the same session (finding C); and
+  `resolveSessionIdentity`'s IPC handler now verifies pty locality itself via
+  `localPtyProvider` before scanning local disk, rather than relying solely on the
+  renderer's own `runtimeEnvironmentId === null` gate (finding E).
 
 ## Open work, in recommended order
 
@@ -170,14 +221,22 @@ Note: commits are listed in dependency order, not `git log` order.
    (b) *No session id to acquire with* — **closed by Decision 2.** The pane's session
    identity is resolved from OMP's own on-disk state (breadcrumb, then mtime fallback),
    bypassing the broken hook chain entirely, rather than waiting on item 2's fix.
-   Read this honestly: the feature is *tested*, still not *proven in a live app*. No
-   end-to-end run against a real OMP pane has happened yet — that is explicitly the next
-   wave's job, and it needs a human at the keyboard (New tab → OMP, open Chat, watch a
-   real turn stream, switch to Terminal view mid-turn and back, confirm the interrupted-
-   turn status row renders on a killed-mid-turn resume). The wave-1/2 experience is the
-   argument for doing that UAT before trusting any of it: the critical `message_update`
-   defect would have killed the session on the very first real prompt, and no amount of
-   fake-child testing surfaced it — only a live probe did. Wave 4's own new mechanisms
+   Read this honestly: the feature is *tested*, still not *proven in a live app*.
+   Wave 5 additionally repaired two Critical defects a cross-lab adversarial
+   review found in wave 4's kill-and-resume/hand-back machinery — an
+   unsuppressed kill that could close the whole tab (Critical A), and an
+   unreachable hand-back effect whose real trigger silently aborted a live
+   turn and never respawned a PTY (Critical B) — see Decision 1's amendment
+   above. No end-to-end run against a real OMP pane has happened yet — that
+   is explicitly the next wave's job, and it needs a human at the keyboard
+   (New tab → OMP, open Chat, watch a real turn stream, switch to Terminal
+   view mid-turn and back, confirm the interrupted-turn status row renders
+   on a killed-mid-turn resume, confirm a mid-turn "leave Chat view" neither
+   aborts the turn nor loses the PTY once it settles). The wave-1/2 and
+   wave-4 experience is the argument for doing that UAT before trusting any
+   of it: two waves in a row shipped a critical defect that only a live
+   probe (wave 2) or a cross-lab adversarial review (wave 4) caught, never
+   the wave's own test suite. Wave 4's own new mechanisms
    (terminal-id-from-tty-path, the cwd-bucket encoding's `--<encoded-absolute>--` branch)
    are similarly unverified against a real OMP process — see the "Verified live facts"
    caveats above.
@@ -235,40 +294,64 @@ Note: commits are listed in dependency order, not `git log` order.
   with the pane's actual cwd — tty device paths are reused across processes) is discarded
   rather than trusted. Any future caller of the resolved path must keep this discipline —
   never hand an unverified path to `switch_session`.
-- The hand-back effect in `use-omp-rpc-chat-session.ts` deliberately depends on
-  `[isVisible, status, paneKey, ptyId, cwd, sessionFile]`, not `turnState` — it reads the
-  latest turn state through a ref (`turnStateRef`) inside its settle-poll loop instead.
-  Adding `turnState`/`resolved` React state as a dependency of an effect that also *writes*
-  that same state via `setState` inside itself causes the effect's own update to trigger a
-  cleanup that cancels its own in-flight async work before it can apply — hit twice while
-  building this wave (also in `use-omp-pane-session-identity.ts`'s first draft). Use a ref
-  for anything the effect body only *reads* to decide when to act, not the effect's own deps.
+- **A `rerender()` in a hook test can silently model the wrong transition.**
+  Wave 4's hand-back tests used `rerender({...BASE_ARGS, isVisible: false})`
+  to simulate "leaving Chat view," but the real trigger unmounts the
+  component (`TerminalPane.tsx`'s portal render gate returning null, not a
+  prop change on a persistently-mounted instance) — `rerender()` re-renders
+  the *same* mounted instance and cannot model an unmount. The suite was
+  internally consistent with the resulting bug (Critical B) and gave false
+  confidence; four tests had this mistake, all in the same describe block.
+  **Any test asserting lifecycle behavior for a transition that unmounts a
+  component in production must use `unmount()` (and remount where relevant),
+  never `rerender()` with changed props** — a passing test that models the
+  wrong transition is worse than no test. `rerender()` remains correct for
+  transitions that genuinely happen on a persistently-mounted instance (e.g.
+  F9's visibility toggle, or an identity rebind while still eligible).
 
 ## Verification baseline
 
-Full sweep after wave 4 (`035522c5c`): `tc:node`/`tc:cli` clean; `tc:web` clean apart from
-the same 9 pre-existing `automations/**` errors at identical file:line, zero new;
-`check:code-quality:changed` reports 0 findings across 95 changed files;
-`electron-vite build` clean (main + preload + renderer).
+Full sweep after wave 5 (`ab67e6711`): `npx -y pnpm@10.24.0 tc` — exactly 9
+`tc:web` errors, all in `src/renderer/src/components/automations/**` at
+identical file:line to wave 4's baseline (upstream `cda2280d6`), zero new;
+`tc:node`/`tc:cli` clean. `check:code-quality:changed` — 0 findings across 98
+changed files (code quality, type-aware code quality, React Doctor all
+clean). `electron-vite build` clean (main + preload + renderer, exit 0).
 
-Full `pnpm test` (62,561 tests): 12 failures, all pre-existing and unrelated —
-- 10 in `src/renderer/src/components/automations/**` + `automation-scoped-list-client.test.ts`,
-  broken by upstream `cda2280d6` (`hasCustomSchedule`, `getAutomationOwnerTarget`,
-  `AutomationsApi.create` — literal `ReferenceError`s in `AutomationsPage.tsx`). Same root
-  cause as the 9 `tc:web` errors. Reproduced in isolation.
-- 2 in `repro-13767-shell-ready-marker-lost-to-exec.test.ts` (spawns real subprocess
-  readline programs and waits on PTY output with a 5s timeout; imports nothing this branch
-  touches). Reproduced twice in isolation in this sandbox — environment-sensitive
-  (real-subprocess PTY timing), not something this wave's code could plausibly cause.
+Full `npx -y pnpm@10.24.0 test` (62,575 tests): 13 failures observed in one
+full-suite run — 12 match wave 4's exact documented baseline, all pre-existing
+and unrelated, each reproduced in isolation this wave too:
+- 10 in `src/renderer/src/components/automations/**` (incl.
+  `automation-scoped-list-client.test.ts`), the same `hasCustomSchedule`/
+  `getAutomationOwnerTarget`/`AutomationsApi.create` `ReferenceError`s from
+  upstream `cda2280d6` — same root cause as the 9 `tc:web` errors.
+- 2 in `repro-13767-shell-ready-marker-lost-to-exec.test.ts` (real-subprocess
+  PTY timing; imports nothing this branch touches).
+- The 13th (`updater.startup-scheduling.test.ts`, a fake-timer scheduling
+  assertion) is **not** in the documented baseline and touches code this
+  branch never does (`src/main/updater.ts`); re-run in isolation it passed
+  cleanly (10/10), confirming flake under full-suite parallel load, not a
+  regression.
 
-Zero failures in any `native-chat`/`omp-rpc`/`pty-provider` file. New wave-4 tests: 13
-(`omp-terminal-session-identity.test.ts`) + 5 (`omp-rpc-chat-handback.test.ts`) + 6
-(`use-omp-pane-session-identity.test.ts`) + new cases folded into the existing
-`omp-rpc-chat.test.ts` (3), `use-omp-rpc-chat-session.test.ts` (7) — all passing.
+Zero failures in any `native-chat`/`omp-rpc`/`pty-provider`/`terminal-pane`
+file — a combined targeted sweep of those four directories plus the main
+`ipc/omp-rpc-chat.test.ts` file (527 files, 5104 tests) passed clean both
+immediately after the code changes and again after the commits' pre-commit
+`oxfmt --write` pass. New/changed wave-5 tests: 5 new
+(`use-omp-rpc-chat-handback-listener.test.ts`) + rewritten hand-back/
+suppression coverage in `use-omp-rpc-chat-session.test.ts` (29 tests, net +1
+after removing 4 `rerender`-modeled hand-back tests and adding 5 `unmount`-
+modeled ones) + 2 new + 1 rewritten in `omp-rpc-session-owner.test.ts` (10
+tests) + 1 new + fixture fix in `omp-rpc-chat-session-registry.test.ts` (16
+tests) + 4 new in `omp-terminal-session-identity.test.ts` (17 tests) + 4 new
+in `omp-rpc-chat.test.ts` (18 tests) — all passing.
 
-Live evidence so far: the 494-command catalog and `/usage` render correctly in the
-dev app (wave 1); wave 3's F12 probe live-verified `switch_session` path-vs-id
-semantics. Everything else, including all of wave 4's new mechanisms, rests on unit
-tests against real temp-fs fixtures and a real (non-mocked) Zustand store — never a real
-OMP process. **The streaming-turn path, the kill-and-resume acquire trigger, and the
-hand-back respawn have never run against a real OMP pane** — see open item 1.
+Live evidence so far: unchanged from wave 4 — the 494-command catalog and
+`/usage` render correctly in the dev app (wave 1); wave 3's F12 probe
+live-verified `switch_session` path-vs-id semantics. Everything wave 4 and 5
+added, including every fix in this wave, rests on unit tests against real
+temp-fs fixtures and a real (non-mocked) Zustand store — never a real OMP
+process. **The streaming-turn path, the kill-and-resume acquire trigger, and
+the hand-back respawn have still never run against a real OMP pane** — that
+is explicitly the next wave's job (open item 1), and per the working rules
+for this wave it was not attempted here.
