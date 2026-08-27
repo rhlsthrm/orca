@@ -102,6 +102,7 @@ docs/**
 !docs/ai-vault-process-isolation-plan.md
 !docs/automations-all-hosts-design.md
 !docs/mobile-terminal-shortcut-bar.md
+!docs/omp-rpc-chat-adapter-plan.md
 !docs/reference/
 !docs/reference/git-compatibility.md
 !docs/reference/headless-linux-server.md
