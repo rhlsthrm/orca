@@ -17,7 +17,8 @@
 // handed back, and a breadcrumb whose recorded cwd disagrees with the pane's actual
 // cwd (stale — ttys device paths are reused across processes) is never trusted.
 import { homedir, tmpdir } from 'node:os'
-import { isAbsolute, join, relative, sep } from 'node:path'
+import { dirname, isAbsolute, join, relative, sep } from 'node:path'
+import { realpathSync } from 'node:fs'
 import type { Dirent } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
 
@@ -40,6 +41,14 @@ export type ResolveOmpPaneSessionIdentityOptions = {
    *  (non-local provider, Windows, or a provider that doesn't expose one) — the
    *  resolver falls straight to the mtime bucket fallback in that case. */
   getSlavePath?: (ptyId: string) => string | undefined
+  /** Session file paths already claimed by a live pane (finding C, cross-lab
+   *  review) — excluded from the mtime-fallback candidate list so two panes
+   *  cd'd into the same cwd can never both resolve to the SAME session via
+   *  the heuristic fallback. The registry's own identity-keyed claim already
+   *  blocks a resulting dual-writer; this narrows the fallback's candidate
+   *  set before that point, so a fresh pane sharing a cwd is never even
+   *  offered another pane's live conversation to display or attempt. */
+  claimedSessionFilePaths?: ReadonlySet<string>
 }
 
 function ompAgentDir(options?: ResolveOmpPaneSessionIdentityOptions): string {
@@ -57,6 +66,44 @@ export function terminalIdFromSlavePath(slavePath: string): string | null {
   const segments = slavePath.split(/[\\/]/).filter(Boolean)
   const last = segments.at(-1)
   return last && last.length > 0 ? last : null
+}
+
+/** Node's `realpathSync` throws if ANY path component is missing — unlike a
+ *  "resolve what exists, keep the rest literal" realpath — so a genuinely
+ *  nonexistent leaf (a stale cwd whose directory was since removed) under
+ *  an existing, symlinked parent would otherwise normalize inconsistently
+ *  against a sibling reference path (home/temp) that itself exists and
+ *  resolves cleanly. Walks up to the longest existing prefix, resolves
+ *  THAT, then reattaches the still-literal missing suffix. Falls back to
+ *  the raw path only when no prefix exists at all (this can only ever
+ *  degrade to "no candidate found" per the module doc, never trust a wrong
+ *  match). Also strips a trailing separator, so a symlinked worktree or a
+ *  trailing slash doesn't make a genuinely-matching cwd read as a mismatch
+ *  (finding D, cross-lab review). */
+function realpathAsFarAsPossible(path: string): string {
+  let current = path
+  const missingSuffix: string[] = []
+  for (;;) {
+    try {
+      const resolved = realpathSync(current)
+      return missingSuffix.length > 0 ? join(resolved, ...missingSuffix) : resolved
+    } catch {
+      const parent = dirname(current)
+      if (parent === current) {
+        // Reached the filesystem root without finding any existing prefix.
+        return path
+      }
+      missingSuffix.unshift(current.slice(parent.length).replace(/^[\\/]+/, ''))
+      current = parent
+    }
+  }
+}
+
+function normalizeCwdForComparison(cwd: string): string {
+  const resolved = realpathAsFarAsPossible(cwd)
+  return resolved.length > 1 && (resolved.endsWith('/') || resolved.endsWith('\\'))
+    ? resolved.slice(0, -1)
+    : resolved
 }
 
 function isPathUnder(parent: string, child: string): boolean {
@@ -89,15 +136,16 @@ export function encodeOmpSessionCwdBucket(
   cwd: string,
   options?: ResolveOmpPaneSessionIdentityOptions
 ): string {
-  const home = options?.homeDir ?? homedir()
-  const temp = options?.tempDir ?? tmpdir()
-  if (isPathUnder(home, cwd)) {
-    return `-${encodeSegments(relative(home, cwd))}`
+  const normalizedCwd = normalizeCwdForComparison(cwd)
+  const home = normalizeCwdForComparison(options?.homeDir ?? homedir())
+  const temp = normalizeCwdForComparison(options?.tempDir ?? tmpdir())
+  if (isPathUnder(home, normalizedCwd)) {
+    return `-${encodeSegments(relative(home, normalizedCwd))}`
   }
-  if (isPathUnder(temp, cwd)) {
-    return `-tmp-${encodeSegments(relative(temp, cwd))}`
+  if (isPathUnder(temp, normalizedCwd)) {
+    return `-tmp-${encodeSegments(relative(temp, normalizedCwd))}`
   }
-  return `--${encodeAbsoluteCwd(cwd)}--`
+  return `--${encodeAbsoluteCwd(normalizedCwd)}--`
 }
 
 export type OmpTerminalBreadcrumb = {
@@ -158,8 +206,10 @@ async function resolveFromBreadcrumb(
     // lifetime; a breadcrumb recorded for a since-repurposed tty slot is
     // stale, not authoritative. Only trust it when it agrees with this
     // pane's actual cwd — otherwise fall through to the mtime heuristic
-    // rather than risk switching into an unrelated pane's session.
-    if (breadcrumb.cwd !== cwd) {
+    // rather than risk switching into an unrelated pane's session. Both
+    // sides are normalized (finding D) so a symlinked worktree or a
+    // trailing slash doesn't read as a mismatch on its own.
+    if (normalizeCwdForComparison(breadcrumb.cwd) !== normalizeCwdForComparison(cwd)) {
       return null
     }
     if (!(await fileExists(breadcrumb.sessionFilePath))) {
@@ -194,6 +244,11 @@ async function resolveNewestSessionFileInBucket(
       continue
     }
     const path = join(bucketDir, entry.name)
+    // Why (finding C): a session another live pane already claimed must
+    // never be offered to a second pane sharing the same cwd bucket.
+    if (options?.claimedSessionFilePaths?.has(path)) {
+      continue
+    }
     try {
       const info = await stat(path)
       candidates.push({ path, mtimeMs: info.mtimeMs })

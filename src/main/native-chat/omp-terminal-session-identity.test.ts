@@ -1,4 +1,4 @@
-import { mkdir, mkdtemp, rm, utimes, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, rm, symlink, utimes, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it } from 'vitest'
@@ -235,5 +235,128 @@ describe('resolveOmpPaneSessionIdentity', () => {
       sessionFilePath: target,
       source: 'mtime-fallback'
     })
+  })
+
+  // Finding D (cross-lab review, wave 5): a breadcrumb's recorded cwd and
+  // the pane's actual cwd are normalized (realpath + trailing-slash strip)
+  // before comparison, so a symlinked worktree or a trailing slash no
+  // longer reads as a stale-tty mismatch on its own.
+  it('resolves via a breadcrumb whose recorded cwd differs from the pane only by symlink resolution (finding D)', async () => {
+    const root = await makeRoot('orca-omp-terminal-identity-symlink-')
+    const realDir = join(root, 'real')
+    await mkdir(realDir, { recursive: true })
+    const linkedDir = join(root, 'linked')
+    await symlink(realDir, linkedDir, 'dir')
+    const sessionFile = join(root, 'sessions', '2026-08-12T00-30-36-053Z_session-a.jsonl')
+    await mkdir(join(root, 'sessions'), { recursive: true })
+    await writeFile(sessionFile, '{}\n')
+    await mkdir(join(root, 'terminal-sessions'), { recursive: true })
+    // Breadcrumb recorded the cwd through the symlink; the pane now reports
+    // the same directory resolved to its real path — same directory,
+    // different string.
+    await writeFile(join(root, 'terminal-sessions', 'ttys000'), `${linkedDir}\n${sessionFile}\n`)
+
+    const resolved = await resolveOmpPaneSessionIdentity(
+      { ptyId: 'pty-1', cwd: realDir },
+      {
+        agentDir: root,
+        homeDir: root,
+        tempDir: join(root, 'no-tmp'),
+        getSlavePath: () => '/dev/ttys000'
+      }
+    )
+
+    expect(resolved).toEqual({
+      sessionId: 'session-a',
+      sessionFilePath: sessionFile,
+      source: 'breadcrumb'
+    })
+  })
+
+  it('resolves via a breadcrumb whose recorded cwd differs from the pane only by a trailing slash (finding D)', async () => {
+    const root = await makeRoot('orca-omp-terminal-identity-trailing-slash-')
+    const cwd = join(root, 'work')
+    await mkdir(cwd, { recursive: true })
+    const sessionFile = join(root, 'sessions', '2026-08-12T00-30-36-053Z_session-a.jsonl')
+    await mkdir(join(root, 'sessions'), { recursive: true })
+    await writeFile(sessionFile, '{}\n')
+    await mkdir(join(root, 'terminal-sessions'), { recursive: true })
+    await writeFile(join(root, 'terminal-sessions', 'ttys000'), `${cwd}/\n${sessionFile}\n`)
+
+    const resolved = await resolveOmpPaneSessionIdentity(
+      { ptyId: 'pty-1', cwd },
+      {
+        agentDir: root,
+        homeDir: root,
+        tempDir: join(root, 'no-tmp'),
+        getSlavePath: () => '/dev/ttys000'
+      }
+    )
+
+    expect(resolved).toEqual({
+      sessionId: 'session-a',
+      sessionFilePath: sessionFile,
+      source: 'breadcrumb'
+    })
+  })
+
+  // Finding C (cross-lab review, wave 5): a session another live pane
+  // already claimed must never be offered to a second pane sharing the
+  // same cwd bucket via the mtime-fallback heuristic.
+  it('excludes a session another live pane already claimed from the mtime fallback', async () => {
+    const root = await makeRoot('orca-omp-terminal-identity-claimed-')
+    const cwd = join(root, 'work')
+    await mkdir(cwd, { recursive: true })
+    const bucketDir = join(root, 'sessions', '-work')
+    await mkdir(bucketDir, { recursive: true })
+    const older = join(bucketDir, '2026-08-11T00-00-00-000Z_older.jsonl')
+    const newer = join(bucketDir, '2026-08-12T00-00-00-000Z_newer.jsonl')
+    await writeFile(older, '{}\n')
+    await writeFile(newer, '{}\n')
+    await utimes(older, new Date('2026-08-11T00:00:00Z'), new Date('2026-08-11T00:00:00Z'))
+    await utimes(newer, new Date('2026-08-12T00:00:00Z'), new Date('2026-08-12T00:00:00Z'))
+
+    // Without exclusion, `newer` would win (see the plain mtime-fallback
+    // test above) — but another pane already claimed it, so the fallback
+    // must skip to the next-newest unclaimed candidate instead.
+    const resolved = await resolveOmpPaneSessionIdentity(
+      { ptyId: 'pty-1', cwd },
+      {
+        agentDir: root,
+        homeDir: root,
+        tempDir: join(root, 'no-tmp'),
+        getSlavePath: () => undefined,
+        claimedSessionFilePaths: new Set([newer])
+      }
+    )
+
+    expect(resolved).toEqual({
+      sessionId: 'older',
+      sessionFilePath: older,
+      source: 'mtime-fallback'
+    })
+  })
+
+  it('returns null when every candidate in the bucket is already claimed', async () => {
+    const root = await makeRoot('orca-omp-terminal-identity-all-claimed-')
+    const cwd = join(root, 'work')
+    await mkdir(cwd, { recursive: true })
+    const bucketDir = join(root, 'sessions', '-work')
+    await mkdir(bucketDir, { recursive: true })
+    const only = join(bucketDir, '2026-08-12T00-00-00-000Z_only.jsonl')
+    await writeFile(only, '{}\n')
+
+    const resolved = await resolveOmpPaneSessionIdentity(
+      { ptyId: 'pty-1', cwd },
+      {
+        agentDir: root,
+        homeDir: root,
+        tempDir: join(root, 'no-tmp'),
+        getSlavePath: () => undefined,
+        claimedSessionFilePaths: new Set([only])
+      }
+    )
+
+    expect(resolved).toBeNull()
   })
 })
