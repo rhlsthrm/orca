@@ -13,11 +13,6 @@ import type {
   OmpRpcChatSubscribeArgs
 } from '../../../../shared/omp-rpc-chat-ipc-contract'
 import type { OmpRpcClientEvent } from '../../../../shared/omp-rpc-protocol'
-import {
-  isOmpRpcChatSessionEligible,
-  useOmpRpcChatSession,
-  type UseOmpRpcChatSessionArgs
-} from './use-omp-rpc-chat-session'
 
 const acquire = vi.fn<(args: OmpRpcChatAcquireArgs) => Promise<OmpRpcChatAcquireResult>>()
 const release = vi.fn<(args: OmpRpcChatReleaseArgs) => Promise<OmpRpcChatReleaseResult>>()
@@ -28,6 +23,18 @@ const subscribe =
   vi.fn<
     (args: OmpRpcChatSubscribeArgs, onEvent: (event: OmpRpcClientEvent) => void) => () => void
   >()
+const ptyKill = vi.fn<(id: string, opts?: { keepHistory?: boolean }) => Promise<void>>()
+const { respawnPtyForOmpRpcChatHandback } = vi.hoisted(() => ({
+  respawnPtyForOmpRpcChatHandback: vi.fn()
+}))
+
+vi.mock('./omp-rpc-chat-handback', () => ({ respawnPtyForOmpRpcChatHandback }))
+
+import {
+  isOmpRpcChatSessionEligible,
+  useOmpRpcChatSession,
+  type UseOmpRpcChatSessionArgs
+} from './use-omp-rpc-chat-session'
 
 const BASE_ARGS: UseOmpRpcChatSessionArgs = {
   agent: 'omp',
@@ -51,8 +58,11 @@ beforeEach(() => {
   vi.clearAllMocks()
   release.mockResolvedValue({ released: true })
   subscribe.mockReturnValue(vi.fn())
+  ptyKill.mockResolvedValue(undefined)
+  respawnPtyForOmpRpcChatHandback.mockResolvedValue({ ok: true, ptyId: 'pty-resumed' })
   ;(window as unknown as { api: unknown }).api = {
-    ompRpcChat: { acquire, release, send, abort, respondExtensionUi, subscribe }
+    ompRpcChat: { acquire, release, send, abort, respondExtensionUi, subscribe },
+    pty: { kill: ptyKill }
   }
 })
 
@@ -102,6 +112,11 @@ describe('useOmpRpcChatSession', () => {
     const { result } = renderHook(() => useOmpRpcChatSession(BASE_ARGS))
 
     await waitFor(() => expect(result.current.status).toBe('acquired'))
+    // Decision 1: the pane's PTY is killed before acquiring — the trigger
+    // that closes the "no live pane ever acquires" gate — and keeps
+    // scrollback for the eventual hand-back.
+    expect(ptyKill).toHaveBeenCalledWith('pty-1', { keepHistory: true })
+    expect(ptyKill.mock.invocationCallOrder[0]).toBeLessThan(acquire.mock.invocationCallOrder[0])
     expect(acquire).toHaveBeenCalledWith({
       paneKey: 'tab-1:leaf-1',
       ptyId: 'pty-1',
@@ -115,6 +130,15 @@ describe('useOmpRpcChatSession', () => {
     })
     expect(result.current.turnState.status).toBe('working')
     expect(result.current.isOwned).toBe(true)
+  })
+
+  it('still acquires when the kill call rejects (best-effort — the registry liveness gate is the real proof)', async () => {
+    ptyKill.mockRejectedValue(new Error('already gone'))
+    acquire.mockResolvedValue({ ok: true })
+    const { result } = renderHook(() => useOmpRpcChatSession(BASE_ARGS))
+
+    await waitFor(() => expect(result.current.status).toBe('acquired'))
+    expect(acquire).toHaveBeenCalledTimes(1)
   })
 
   it.each(['live', 'unverifiable', 'conflict', 'spawn-failed', 'executable-not-found'] as const)(
@@ -329,5 +353,123 @@ describe('useOmpRpcChatSession', () => {
 
     await waitFor(() => expect(result.current.status).toBe('spawn-failed'))
     expect(result.current.isOwned).toBe(false)
+  })
+
+  // Decision 1's hand-back, reconciled with F9: leaving Chat view while
+  // idle releases and respawns after the initial deferral tick; a live
+  // turn must settle first (never abort-and-release), and a fleeting
+  // flip back to Chat view before either fires cancels the hand-back
+  // entirely rather than wasting a kill+respawn.
+  describe('hand-back to Terminal view', () => {
+    it('releases and respawns once idle after leaving Chat view', async () => {
+      acquire.mockResolvedValue({ ok: true })
+      const { result, rerender } = renderHook(
+        (props: UseOmpRpcChatSessionArgs) => useOmpRpcChatSession(props),
+        { initialProps: BASE_ARGS }
+      )
+      await waitFor(() => expect(result.current.status).toBe('acquired'))
+
+      rerender({ ...BASE_ARGS, isVisible: false })
+
+      await waitFor(() => expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' }), {
+        timeout: 2000
+      })
+      await waitFor(
+        () =>
+          expect(respawnPtyForOmpRpcChatHandback).toHaveBeenCalledWith({
+            paneKey: 'tab-1:leaf-1',
+            replacedPtyId: 'pty-1',
+            cwd: '/work/a',
+            sessionId: 'session-1'
+          }),
+        { timeout: 2000 }
+      )
+      await waitFor(() => expect(result.current.status).toBe('idle'))
+    })
+
+    it('defers hand-back until an in-flight turn settles, never aborting it', async () => {
+      acquire.mockResolvedValue({ ok: true })
+      const { result, rerender } = renderHook(
+        (props: UseOmpRpcChatSessionArgs) => useOmpRpcChatSession(props),
+        { initialProps: BASE_ARGS }
+      )
+      await waitFor(() => expect(result.current.status).toBe('acquired'))
+      act(() => {
+        lastSubscribedListener()({ kind: 'agent-start', frame: { type: 'agent_start' } })
+      })
+      expect(result.current.turnState.status).toBe('working')
+
+      rerender({ ...BASE_ARGS, isVisible: false })
+
+      // Give the initial deferral tick + at least one settle-poll tick a
+      // real chance to elapse; the turn is still working, so release must
+      // not have fired yet — Decision 1 never aborts a live turn.
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      expect(release).not.toHaveBeenCalled()
+      expect(result.current.turnState.status).toBe('working')
+
+      act(() => {
+        lastSubscribedListener()({
+          kind: 'agent-end',
+          frame: { type: 'agent_end', isTerminal: true }
+        })
+      })
+
+      await waitFor(() => expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' }), {
+        timeout: 2000
+      })
+      await waitFor(() => expect(respawnPtyForOmpRpcChatHandback).toHaveBeenCalledTimes(1), {
+        timeout: 2000
+      })
+    })
+
+    it('cancels the pending hand-back when the pane returns to Chat view first', async () => {
+      acquire.mockResolvedValue({ ok: true })
+      const { result, rerender } = renderHook(
+        (props: UseOmpRpcChatSessionArgs) => useOmpRpcChatSession(props),
+        { initialProps: BASE_ARGS }
+      )
+      await waitFor(() => expect(result.current.status).toBe('acquired'))
+
+      rerender({ ...BASE_ARGS, isVisible: false })
+      rerender({ ...BASE_ARGS, isVisible: true })
+
+      // Wait well past the deferral tick to prove the cancellation held, not
+      // just that the assertion ran before the tick fired.
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      expect(release).not.toHaveBeenCalled()
+      expect(respawnPtyForOmpRpcChatHandback).not.toHaveBeenCalled()
+      expect(result.current.status).toBe('acquired')
+    })
+
+    it('does not respawn when release reports it was already unowned', async () => {
+      acquire.mockResolvedValue({ ok: true })
+      release.mockResolvedValue({ released: false })
+      const { result, rerender } = renderHook(
+        (props: UseOmpRpcChatSessionArgs) => useOmpRpcChatSession(props),
+        { initialProps: BASE_ARGS }
+      )
+      await waitFor(() => expect(result.current.status).toBe('acquired'))
+
+      rerender({ ...BASE_ARGS, isVisible: false })
+
+      await waitFor(() => expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' }), {
+        timeout: 2000
+      })
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      expect(respawnPtyForOmpRpcChatHandback).not.toHaveBeenCalled()
+    })
+
+    it('never fires hand-back on unmount — pane close must not spawn a new PTY', async () => {
+      acquire.mockResolvedValue({ ok: true })
+      const { result, unmount } = renderHook(() => useOmpRpcChatSession(BASE_ARGS))
+      await waitFor(() => expect(result.current.status).toBe('acquired'))
+
+      unmount()
+
+      expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' })
+      await new Promise((resolve) => setTimeout(resolve, 600))
+      expect(respawnPtyForOmpRpcChatHandback).not.toHaveBeenCalled()
+    })
   })
 })
