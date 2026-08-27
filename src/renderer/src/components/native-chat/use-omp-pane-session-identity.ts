@@ -11,7 +11,7 @@ import type { AgentType } from '../../../../shared/agent-status-types'
 import { isOmpRpcCatalogAgent } from './use-omp-rpc-commands'
 
 export type UseOmpPaneSessionIdentityArgs = {
-  agent: AgentType
+  agent: AgentType | null
   ptyId: string | null
   cwd: string | null
   runtimeEnvironmentId: string | null

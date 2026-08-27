@@ -12,8 +12,6 @@ import { useNativeChatCanSend } from './use-native-chat-can-send'
 import { NativeChatInteractiveCard } from './NativeChatInteractiveCard'
 import { NativeChatExtensionUiCard } from './NativeChatExtensionUiCard'
 import { useNativeChatOmpRpcIntegration } from './use-native-chat-omp-rpc-integration'
-import { useOmpPaneSessionIdentity } from './use-omp-pane-session-identity'
-import { useOmpRpcProbeCwd } from './use-omp-rpc-commands'
 import { NativeChatEmptyState } from './NativeChatEmptyState'
 import { NativeChatSessionGate } from './NativeChatSessionGate'
 import { useNativeChatInteractiveSend } from './use-native-chat-interactive-send'
@@ -131,31 +129,18 @@ function NativeChatResolvedView({
     runtimeEnvironmentId,
     enabled: isVisible
   })
-  const ompRpcCwd = useOmpRpcProbeCwd(agent, terminalTabId)
-  // Decision 2: resolved from OMP's own on-disk state (terminal breadcrumb,
-  // then newest-by-mtime cwd bucket), bypassing the broken agent-status hook
-  // chain that `sessionId` above depends on for omp panes (#8962). Null
-  // means nothing to resume yet, which correctly keeps acquisition closed.
-  const ompRpcResolvedSessionId = useOmpPaneSessionIdentity({
-    agent,
-    ptyId: targetPtyId,
-    cwd: ompRpcCwd,
-    runtimeEnvironmentId,
-    isVisible
-  })
   // The agent's in-progress reply preview (hook), shown as a live streaming
   // bubble while it works — before the completed turn flushes to the transcript.
   // Read here (rather than at first use) so the RPC integration below can
   // enforce D5's "one live overlay only" exclusivity against it.
   const hookPreview = useAppStore((s) => s.agentStatusByPaneKey[paneKey]?.lastAssistantMessage)
+  // Pure store subscriber (W6-2): RPC ownership is acquired and held by
+  // use-omp-rpc-chat-pane-ownership.ts, anchored at TerminalPane for the
+  // pane's life — this view never acquires anything itself, so remounting
+  // it (an ordinary Terminal<->Chat toggle) cannot re-trigger acquisition
+  // or lose in-flight turn state.
   const ompRpc = useNativeChatOmpRpcIntegration({
-    agent,
     paneKey,
-    ptyId: targetPtyId,
-    cwd: ompRpcCwd,
-    sessionFile: ompRpcResolvedSessionId,
-    isVisible,
-    runtimeEnvironmentId,
     transcriptMessages: session.messages,
     hookPreview
   })

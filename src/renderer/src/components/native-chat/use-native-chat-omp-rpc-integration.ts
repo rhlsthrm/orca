@@ -1,12 +1,19 @@
-// Composes the RPC chat session (use-omp-rpc-chat-session.ts) with the wave-1
-// overlay/status projections (omp-rpc-turn-reducer.ts) into the exact set of
-// values NativeChatView needs, so the view itself stays a thin consumer. Kept
-// separate from the session hook so the merge/exclusivity rules below —
-// "never both" (hook preview vs. RPC overlay) and "status only when active"
-// (D5) — are unit-testable without mounting the acquisition effect.
+// Composes the RPC chat ownership state (published by the TerminalPane-
+// anchored use-omp-rpc-chat-pane-ownership.ts) with the wave-1 overlay/status
+// projections (omp-rpc-turn-reducer.ts) into the exact set of values
+// NativeChatView needs, so the view itself stays a thin, pure, remountable
+// subscriber — it owns none of the acquire/hold/release lifecycle and
+// performs no IPC of its own; every send/abort/respondExtensionUi call
+// re-reads current ownership from the store and goes straight through the
+// paneKey-scoped store actions (mirroring the existing agentStatusByPaneKey
+// pattern: the component that renders the state is not the component that
+// owns its lifecycle). Kept separate from the store slice so the
+// merge/exclusivity rules below — "never both" (hook preview vs. RPC
+// overlay) and "status only when active" (D5) — are unit-testable without
+// touching the store.
 
 import { useMemo } from 'react'
-import type { AgentType } from '../../../../shared/agent-status-types'
+import { useAppStore } from '../../store'
 import type { NativeChatMessage } from '../../../../shared/native-chat-types'
 import type {
   OmpRpcChatSendResult,
@@ -17,16 +24,9 @@ import type {
   OmpRpcExtensionUiResponse
 } from '../../../../shared/omp-rpc-protocol'
 import { isOmpRpcTurnActive, selectOmpRpcOverlayMessages } from './omp-rpc-turn-reducer'
-import { useOmpRpcChatSession } from './use-omp-rpc-chat-session'
 
 export type UseNativeChatOmpRpcIntegrationArgs = {
-  agent: AgentType
   paneKey: string
-  ptyId: string | null
-  cwd: string | null
-  sessionFile: string | null
-  isVisible: boolean
-  runtimeEnvironmentId: string | null
   transcriptMessages: readonly NativeChatMessage[]
   /** The hook-preview bubble's raw source text, before RPC exclusivity. */
   hookPreview: string | null | undefined
@@ -56,24 +56,31 @@ export type NativeChatOmpRpcIntegration = {
 export function useNativeChatOmpRpcIntegration(
   args: UseNativeChatOmpRpcIntegrationArgs
 ): NativeChatOmpRpcIntegration {
-  const session = useOmpRpcChatSession(args)
-  const isRpcOwned = session.isOwned
+  const { paneKey } = args
+  const entry = useAppStore((s) => s.ompRpcChatOwnershipByPaneKey[paneKey])
+  const sendOmpRpcChatPane = useAppStore((s) => s.sendOmpRpcChatPane)
+  const abortOmpRpcChatPane = useAppStore((s) => s.abortOmpRpcChatPane)
+  const respondOmpRpcChatExtensionUi = useAppStore((s) => s.respondOmpRpcChatExtensionUi)
+  const isRpcOwned = entry?.status === 'acquired'
+  const turnState = entry?.turnState
 
   const overlayMessages = useMemo(
     () =>
-      isRpcOwned ? selectOmpRpcOverlayMessages(session.turnState, args.transcriptMessages) : [],
-    [isRpcOwned, session.turnState, args.transcriptMessages]
+      isRpcOwned && turnState
+        ? selectOmpRpcOverlayMessages(turnState, args.transcriptMessages)
+        : [],
+    [isRpcOwned, turnState, args.transcriptMessages]
   )
 
   return {
     isRpcOwned,
-    isRpcTurnWorking: isRpcOwned && session.turnState.status === 'working',
+    isRpcTurnWorking: isRpcOwned && turnState?.status === 'working',
     overlayMessages,
-    statusOverride: isRpcOwned && isOmpRpcTurnActive(session.turnState) ? 'working' : null,
+    statusOverride: isRpcOwned && turnState && isOmpRpcTurnActive(turnState) ? 'working' : null,
     effectiveHookPreview: isRpcOwned ? null : args.hookPreview,
-    pendingExtensionUiRequest: isRpcOwned ? session.turnState.pendingExtensionUiRequest : null,
-    answerExtensionUi: session.respondExtensionUi,
-    sendChat: session.send,
-    abortChat: session.abort
+    pendingExtensionUiRequest: isRpcOwned ? (turnState?.pendingExtensionUiRequest ?? null) : null,
+    answerExtensionUi: (response) => respondOmpRpcChatExtensionUi(paneKey, response),
+    sendChat: (sendArgs) => sendOmpRpcChatPane(paneKey, sendArgs),
+    abortChat: () => abortOmpRpcChatPane(paneKey)
   }
 }

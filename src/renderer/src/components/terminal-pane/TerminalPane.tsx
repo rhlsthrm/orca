@@ -70,6 +70,9 @@ import {
 } from './pane-title-overlay-rects'
 import NativeChatView from '../native-chat/NativeChatView'
 import { useOmpRpcChatHandbackListener } from '../native-chat/use-omp-rpc-chat-handback-listener'
+import { useOmpRpcChatPaneOwnership } from '../native-chat/use-omp-rpc-chat-pane-ownership'
+import { useOmpRpcProbeCwd } from '../native-chat/use-omp-rpc-commands'
+import { selectNativeChatRuntimeEnvironmentId } from '../native-chat/native-chat-runtime-owner'
 import { splitTerminalPaneWithInheritedCwd } from './terminal-pane-split-with-inherited-cwd'
 import { TerminalAgentSessionForkDialog } from './TerminalAgentSessionForkDialog'
 import { AgentSessionContinuationDialog } from '@/components/agent-session-continuation/AgentSessionContinuationDialog'
@@ -3002,6 +3005,36 @@ function TerminalPane(
       }) ?? resolveTitleAgentForLeaf(leafId)
     )
   }
+  // W6-2: RPC ownership (Decision 1) is anchored to this pane's life, not
+  // the Chat-view mount. These mirror chatPane/chatPanePtyId/
+  // chatPaneResolvedAgent above but are deliberately UNGATED on
+  // isChatViewMode, so the identity used to acquire and hold ownership
+  // stays resolvable across an ordinary Terminal<->Chat toggle instead of
+  // vanishing whenever the chat portal unmounts.
+  const chatOwnerPane = chatLeafId
+    ? (managedPanes.find((pane) => pane.leafId === chatLeafId) ?? null)
+    : null
+  const chatOwnerPaneKey = chatOwnerPane ? makePaneKey(tabId, chatOwnerPane.leafId) : null
+  const chatOwnerPtyId = chatOwnerPane
+    ? (paneTransportsRef.current.get(chatOwnerPane.id)?.getPtyId() ?? null)
+    : null
+  const chatOwnerAgent = resolveAgentForLeaf(chatOwnerPane?.leafId ?? null)
+  const chatOwnerRuntimeEnvironmentId = useAppStore((s) =>
+    selectNativeChatRuntimeEnvironmentId(s, tabId)
+  )
+  const chatOwnerCwd = useOmpRpcProbeCwd(chatOwnerAgent, tabId)
+  // The trigger for the FIRST acquisition only — the hook's own F9 latch
+  // holds ownership once acquired regardless of this later going false on
+  // an ordinary Terminal<->Chat toggle or the tab backgrounding.
+  const chatOwnerIsVisible = Boolean(effectiveChatViewMode && chatOwnerPane && isRendererVisible)
+  useOmpRpcChatPaneOwnership({
+    agent: chatOwnerAgent,
+    paneKey: chatOwnerPaneKey,
+    ptyId: chatOwnerPtyId,
+    cwd: chatOwnerCwd,
+    isVisible: chatOwnerIsVisible,
+    runtimeEnvironmentId: chatOwnerRuntimeEnvironmentId
+  })
   const activePaneCanContinueInNewSession = canContinueAgentSessionInNewSession(
     resolveAgentForLeaf(activePane?.leafId ?? null)
   )

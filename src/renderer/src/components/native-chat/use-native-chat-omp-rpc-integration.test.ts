@@ -1,34 +1,28 @@
 // @vitest-environment happy-dom
 
-import { renderHook } from '@testing-library/react'
-import { describe, expect, it, vi } from 'vitest'
+import { act, renderHook } from '@testing-library/react'
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useAppStore } from '@/store'
 import type { NativeChatMessage } from '../../../../shared/native-chat-types'
 import { createInitialOmpRpcTurnState, type OmpRpcTurnState } from './omp-rpc-turn-reducer'
-import type { OmpRpcChatSessionHandle } from './use-omp-rpc-chat-session'
+import { useNativeChatOmpRpcIntegration } from './use-native-chat-omp-rpc-integration'
 
+const acquire = vi.fn()
 const send = vi.fn()
 const abort = vi.fn()
 const respondExtensionUi = vi.fn()
-let sessionHandle: OmpRpcChatSessionHandle
 
-vi.mock('./use-omp-rpc-chat-session', () => ({
-  useOmpRpcChatSession: () => sessionHandle
-}))
+const PANE_KEY = 'tab-1:leaf-1'
 
-import { useNativeChatOmpRpcIntegration } from './use-native-chat-omp-rpc-integration'
-
-function handle(overrides: {
-  isOwned: boolean
-  turnState: OmpRpcTurnState
-}): OmpRpcChatSessionHandle {
-  return {
-    status: overrides.isOwned ? 'acquired' : 'live',
-    isOwned: overrides.isOwned,
-    turnState: overrides.turnState,
-    send,
-    abort,
-    respondExtensionUi
-  }
+function seedOwnership(overrides: { isOwned: boolean; turnState: OmpRpcTurnState }): void {
+  useAppStore.setState({
+    ompRpcChatOwnershipByPaneKey: {
+      [PANE_KEY]: {
+        status: overrides.isOwned ? 'acquired' : 'live',
+        turnState: overrides.turnState
+      }
+    }
+  })
 }
 
 const transcript = (text: string): NativeChatMessage[] => [
@@ -42,20 +36,27 @@ const transcript = (text: string): NativeChatMessage[] => [
 ]
 
 const ARGS = {
-  agent: 'omp' as const,
-  paneKey: 'tab-1:leaf-1',
-  ptyId: 'pty-1',
-  cwd: '/work/a',
-  sessionFile: 'session-1',
-  isVisible: true,
-  runtimeEnvironmentId: null,
+  paneKey: PANE_KEY,
   transcriptMessages: [] as NativeChatMessage[],
   hookPreview: undefined as string | null | undefined
 }
 
+beforeEach(() => {
+  vi.clearAllMocks()
+  useAppStore.setState(useAppStore.getInitialState(), true)
+  send.mockResolvedValue({ ok: true, agentInvoked: true })
+  abort.mockResolvedValue({ ok: true, agentInvoked: true })
+  ;(window as unknown as { api: unknown }).api = {
+    ompRpcChat: { acquire, send, abort, respondExtensionUi }
+  }
+})
+
+afterEach(() => {
+  delete (window as unknown as { api?: unknown }).api
+})
+
 describe('useNativeChatOmpRpcIntegration', () => {
-  it('is a no-op when the pane is not RPC-owned: no overlay, no status override, hook preview passes through', () => {
-    sessionHandle = handle({ isOwned: false, turnState: createInitialOmpRpcTurnState() })
+  it('is a no-op when the pane has no ownership row: no overlay, no status override, hook preview passes through', () => {
     const { result } = renderHook(() =>
       useNativeChatOmpRpcIntegration({ ...ARGS, hookPreview: 'typing…' })
     )
@@ -68,7 +69,7 @@ describe('useNativeChatOmpRpcIntegration', () => {
   })
 
   it('suppresses the hook preview whenever RPC owns the pane, so the two overlays never both render', () => {
-    sessionHandle = handle({
+    seedOwnership({
       isOwned: true,
       turnState: { ...createInitialOmpRpcTurnState(), status: 'working' }
     })
@@ -80,7 +81,7 @@ describe('useNativeChatOmpRpcIntegration', () => {
   })
 
   it('overrides status to working only while the RPC turn is active (D5)', () => {
-    sessionHandle = handle({
+    seedOwnership({
       isOwned: true,
       turnState: { ...createInitialOmpRpcTurnState(), status: 'working' }
     })
@@ -91,7 +92,7 @@ describe('useNativeChatOmpRpcIntegration', () => {
     // F2 regression: a turn that already completed must not still read as
     // "working" just because its content (assistantText/blocks) survives for
     // the leads-vs-transcript compare — status is the lifecycle fact.
-    sessionHandle = handle({
+    seedOwnership({
       isOwned: true,
       turnState: { ...createInitialOmpRpcTurnState(), status: 'idle', assistantText: 'hi there' }
     })
@@ -101,7 +102,7 @@ describe('useNativeChatOmpRpcIntegration', () => {
   })
 
   it('never surfaces an overlay message the transcript already covers (D4)', () => {
-    sessionHandle = handle({
+    seedOwnership({
       isOwned: true,
       turnState: { ...createInitialOmpRpcTurnState(), status: 'working', assistantText: 'done' }
     })
@@ -113,7 +114,7 @@ describe('useNativeChatOmpRpcIntegration', () => {
   })
 
   it('surfaces the overlay while it leads the transcript', () => {
-    sessionHandle = handle({
+    seedOwnership({
       isOwned: true,
       turnState: {
         ...createInitialOmpRpcTurnState(),
@@ -132,7 +133,7 @@ describe('useNativeChatOmpRpcIntegration', () => {
 
   it('surfaces the pending extension UI request only when RPC-owned', () => {
     const request = { type: 'extension_ui_request' as const, id: 'req-1', method: 'confirm' }
-    sessionHandle = handle({
+    seedOwnership({
       isOwned: false,
       turnState: { ...createInitialOmpRpcTurnState(), pendingExtensionUiRequest: request }
     })
@@ -141,7 +142,7 @@ describe('useNativeChatOmpRpcIntegration', () => {
         .pendingExtensionUiRequest
     ).toBeNull()
 
-    sessionHandle = handle({
+    seedOwnership({
       isOwned: true,
       turnState: { ...createInitialOmpRpcTurnState(), pendingExtensionUiRequest: request }
     })
@@ -151,12 +152,39 @@ describe('useNativeChatOmpRpcIntegration', () => {
     ).toEqual(request)
   })
 
-  it('forwards send/abort/respondExtensionUi to the underlying session', () => {
-    sessionHandle = handle({ isOwned: true, turnState: createInitialOmpRpcTurnState() })
+  it('forwards send/abort/respondExtensionUi to the paneKey-scoped store actions', async () => {
+    seedOwnership({ isOwned: true, turnState: createInitialOmpRpcTurnState() })
     const { result } = renderHook(() => useNativeChatOmpRpcIntegration(ARGS))
 
-    expect(result.current.sendChat).toBe(send)
-    expect(result.current.abortChat).toBe(abort)
-    expect(result.current.answerExtensionUi).toBe(respondExtensionUi)
+    await result.current.sendChat({ message: 'hi', behavior: 'idle' })
+    await result.current.abortChat()
+    act(() => {
+      result.current.answerExtensionUi({
+        type: 'extension_ui_response',
+        id: 'req-1',
+        confirmed: true
+      })
+    })
+
+    expect(send).toHaveBeenCalledWith({ paneKey: PANE_KEY, message: 'hi', behavior: 'idle' })
+    expect(abort).toHaveBeenCalledWith({ paneKey: PANE_KEY })
+    expect(respondExtensionUi).toHaveBeenCalledWith({
+      paneKey: PANE_KEY,
+      response: { type: 'extension_ui_response', id: 'req-1', confirmed: true }
+    })
+  })
+
+  // W6-2 regression guard: ownership acquisition lives entirely in the
+  // TerminalPane-anchored use-omp-rpc-chat-pane-ownership.ts hook, published
+  // into this store slice — this integration hook (mounted inside the
+  // remountable NativeChatView) must never itself acquire anything. A
+  // remount (an ordinary Terminal<->Chat toggle) performing zero RPC IPC is
+  // exactly what makes the toggle instant again.
+  it('never acquires anything itself: mount, rerender, and unmount perform zero RPC IPC', () => {
+    const { rerender, unmount } = renderHook(() => useNativeChatOmpRpcIntegration(ARGS))
+    rerender()
+    unmount()
+
+    expect(acquire).not.toHaveBeenCalled()
   })
 })
