@@ -1198,6 +1198,9 @@ export class LocalPtyProvider implements IPtyProvider {
   hasPty(id: string): boolean {
     return ptyProcesses.has(id)
   }
+  getSlavePath(id: string): string | undefined {
+    return readPtySlavePath(ptyProcesses.get(id))
+  }
   write(id: string, data: string): boolean {
     // Cooked PTYs echo private DSR/OSC replies; CPR/DA stay immediate unless one of
     // those is still held, which they must not overtake (#13137, #7329, #15559).
