@@ -2,6 +2,7 @@
 
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
+import { useAppStore } from '@/store'
 import type {
   OmpRpcChatAcquireArgs,
   OmpRpcChatAcquireResult,
@@ -24,11 +25,6 @@ const subscribe =
     (args: OmpRpcChatSubscribeArgs, onEvent: (event: OmpRpcClientEvent) => void) => () => void
   >()
 const ptyKill = vi.fn<(id: string, opts?: { keepHistory?: boolean }) => Promise<void>>()
-const { respawnPtyForOmpRpcChatHandback } = vi.hoisted(() => ({
-  respawnPtyForOmpRpcChatHandback: vi.fn()
-}))
-
-vi.mock('./omp-rpc-chat-handback', () => ({ respawnPtyForOmpRpcChatHandback }))
 
 import {
   isOmpRpcChatSessionEligible,
@@ -38,7 +34,7 @@ import {
 
 const BASE_ARGS: UseOmpRpcChatSessionArgs = {
   agent: 'omp',
-  paneKey: 'tab-1:leaf-1',
+  paneKey: 'tab-1:11111111-1111-4111-8111-111111111111',
   ptyId: 'pty-1',
   cwd: '/work/a',
   sessionFile: 'session-1',
@@ -59,7 +55,10 @@ beforeEach(() => {
   release.mockResolvedValue({ released: true })
   subscribe.mockReturnValue(vi.fn())
   ptyKill.mockResolvedValue(undefined)
-  respawnPtyForOmpRpcChatHandback.mockResolvedValue({ ok: true, ptyId: 'pty-resumed' })
+  // Why: killPtyBeforeOmpRpcAcquire (Critical A) touches the real store —
+  // reset it so one test's suppression/pty-binding state never leaks into
+  // the next.
+  useAppStore.setState(useAppStore.getInitialState(), true)
   ;(window as unknown as { api: unknown }).api = {
     ompRpcChat: { acquire, release, send, abort, respondExtensionUi, subscribe },
     pty: { kill: ptyKill }
@@ -118,7 +117,7 @@ describe('useOmpRpcChatSession', () => {
     expect(ptyKill).toHaveBeenCalledWith('pty-1', { keepHistory: true })
     expect(ptyKill.mock.invocationCallOrder[0]).toBeLessThan(acquire.mock.invocationCallOrder[0])
     expect(acquire).toHaveBeenCalledWith({
-      paneKey: 'tab-1:leaf-1',
+      paneKey: 'tab-1:11111111-1111-4111-8111-111111111111',
       ptyId: 'pty-1',
       cwd: '/work/a',
       sessionFile: 'session-1'
@@ -174,7 +173,10 @@ describe('useOmpRpcChatSession', () => {
     unmount()
 
     expect(unsubscribe).toHaveBeenCalledTimes(1)
-    expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' })
+    expect(release).toHaveBeenCalledWith({
+      paneKey: 'tab-1:11111111-1111-4111-8111-111111111111',
+      respawn: { replacedPtyId: 'pty-1', cwd: '/work/a', sessionId: 'session-1' }
+    })
   })
 
   // F9: a visibility toggle (Chat -> Terminal and back) must never abort or
@@ -211,10 +213,13 @@ describe('useOmpRpcChatSession', () => {
     rerender({ ...BASE_ARGS, ptyId: 'pty-2' })
 
     expect(result.current.turnState.status).toBe('idle')
-    expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' })
+    expect(release).toHaveBeenCalledWith({
+      paneKey: 'tab-1:11111111-1111-4111-8111-111111111111',
+      respawn: { replacedPtyId: 'pty-1', cwd: '/work/a', sessionId: 'session-1' }
+    })
     await waitFor(() => expect(acquire).toHaveBeenCalledTimes(2))
     expect(acquire).toHaveBeenLastCalledWith({
-      paneKey: 'tab-1:leaf-1',
+      paneKey: 'tab-1:11111111-1111-4111-8111-111111111111',
       ptyId: 'pty-2',
       cwd: '/work/a',
       sessionFile: 'session-1'
@@ -228,7 +233,12 @@ describe('useOmpRpcChatSession', () => {
 
     unmount()
     resolveAcquire({ ok: true })
-    await waitFor(() => expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' }))
+    await waitFor(() =>
+      expect(release).toHaveBeenCalledWith({
+        paneKey: 'tab-1:11111111-1111-4111-8111-111111111111',
+        respawn: { replacedPtyId: 'pty-1', cwd: '/work/a', sessionId: 'session-1' }
+      })
+    )
     expect(subscribe).not.toHaveBeenCalled()
   })
 
@@ -257,11 +267,11 @@ describe('useOmpRpcChatSession', () => {
     await result.current.abort()
 
     expect(send).toHaveBeenCalledWith({
-      paneKey: 'tab-1:leaf-1',
+      paneKey: 'tab-1:11111111-1111-4111-8111-111111111111',
       message: 'hi',
       behavior: 'steer'
     })
-    expect(abort).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' })
+    expect(abort).toHaveBeenCalledWith({ paneKey: 'tab-1:11111111-1111-4111-8111-111111111111' })
   })
 
   it('answers extension UI by dispatching the reducer action and forwarding the reply', async () => {
@@ -285,7 +295,7 @@ describe('useOmpRpcChatSession', () => {
     })
 
     expect(respondExtensionUi).toHaveBeenCalledWith({
-      paneKey: 'tab-1:leaf-1',
+      paneKey: 'tab-1:11111111-1111-4111-8111-111111111111',
       response: { type: 'extension_ui_response', id: 'req-1', confirmed: true }
     })
     expect(result.current.turnState.pendingExtensionUiRequest).toBeNull()
@@ -324,7 +334,11 @@ describe('useOmpRpcChatSession', () => {
 
       expect(result.current.status).toBe('faulted')
       expect(result.current.isOwned).toBe(false)
-      await waitFor(() => expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' }))
+      await waitFor(() =>
+        expect(release).toHaveBeenCalledWith({
+          paneKey: 'tab-1:11111111-1111-4111-8111-111111111111'
+        })
+      )
 
       const sendResult = await result.current.send({ message: 'hi', behavior: 'idle' })
       expect(sendResult.ok).toBe(false)
@@ -355,121 +369,108 @@ describe('useOmpRpcChatSession', () => {
     expect(result.current.isOwned).toBe(false)
   })
 
-  // Decision 1's hand-back, reconciled with F9: leaving Chat view while
-  // idle releases and respawns after the initial deferral tick; a live
-  // turn must settle first (never abort-and-release), and a fleeting
-  // flip back to Chat view before either fires cancels the hand-back
-  // entirely rather than wasting a kill+respawn.
-  describe('hand-back to Terminal view', () => {
-    it('releases and respawns once idle after leaving Chat view', async () => {
-      acquire.mockResolvedValue({ ok: true })
-      const { result, rerender } = renderHook(
-        (props: UseOmpRpcChatSessionArgs) => useOmpRpcChatSession(props),
-        { initialProps: BASE_ARGS }
-      )
-      await waitFor(() => expect(result.current.status).toBe('acquired'))
-
-      rerender({ ...BASE_ARGS, isVisible: false })
-
-      await waitFor(() => expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' }), {
-        timeout: 2000
+  // Critical A (cross-lab review, wave 5): killPtyBeforeOmpRpcAcquire used
+  // to kill the pane's live PTY without suppressing the exit, so the
+  // eventual pty:exit landed on pty-exit-hibernate.ts's "process died"
+  // teardown instead of its suppressed branch — closing the whole tab for
+  // the common single-pane case. Suppressing (and proactively clearing the
+  // tab's pty binding to a well-defined "RPC-owned, no PTY" state) routes
+  // that later, real exit to the suppressed branch instead — no tab-close
+  // path is reachable from a suppressed exit.
+  describe('Critical A — suppressing the pty exit before kill', () => {
+    beforeEach(() => {
+      useAppStore.setState({
+        tabsByWorktree: {
+          'wt-1': [
+            {
+              id: 'tab-1',
+              ptyId: 'pty-1',
+              worktreeId: 'wt-1',
+              title: null,
+              customTitle: null,
+              color: null,
+              sortOrder: 0,
+              createdAt: 1,
+              launchAgent: 'omp' as const
+            }
+          ]
+        } as never,
+        ptyIdsByTabId: { 'tab-1': ['pty-1'] }
       })
-      await waitFor(
-        () =>
-          expect(respawnPtyForOmpRpcChatHandback).toHaveBeenCalledWith({
-            paneKey: 'tab-1:leaf-1',
-            replacedPtyId: 'pty-1',
-            cwd: '/work/a',
-            sessionId: 'session-1'
-          }),
-        { timeout: 2000 }
-      )
-      await waitFor(() => expect(result.current.status).toBe('idle'))
     })
 
-    it('defers hand-back until an in-flight turn settles, never aborting it', async () => {
+    it('suppresses the exit and clears the tab pty binding before killing', async () => {
       acquire.mockResolvedValue({ ok: true })
-      const { result, rerender } = renderHook(
-        (props: UseOmpRpcChatSessionArgs) => useOmpRpcChatSession(props),
-        { initialProps: BASE_ARGS }
-      )
+      let suppressedBeforeKill = false
+      let clearedBeforeKill = false
+      ptyKill.mockImplementation(async () => {
+        suppressedBeforeKill = useAppStore.getState().suppressedPtyExitIds['pty-1'] === true
+        clearedBeforeKill = useAppStore.getState().tabsByWorktree['wt-1']?.[0]?.ptyId === null
+      })
+
+      renderHook(() => useOmpRpcChatSession(BASE_ARGS))
+
+      await waitFor(() => expect(ptyKill).toHaveBeenCalled())
+      expect(suppressedBeforeKill).toBe(true)
+      expect(clearedBeforeKill).toBe(true)
+      // Left ARMED, not self-consumed: onExit itself must be the one to
+      // consume it once the real exit round-trips back — self-consuming
+      // here would leave that later, real exit unsuppressed and fall
+      // through to the tab-close bug this suppression exists to prevent.
+      expect(useAppStore.getState().suppressedPtyExitIds['pty-1']).toBe(true)
+    })
+  })
+
+  // Critical B (cross-lab review, wave 5): the old deferred hand-back
+  // effect was gated on `isVisible` while the hook stayed mounted, but the
+  // real "leave Chat view" trigger (TerminalPane's portal render gate
+  // returning null) unmounts this hook entirely — a transition
+  // `rerender()` cannot model. Wave 4's own tests here used
+  // `rerender({ isVisible: false })` to simulate it, which is why they
+  // passed while the real trigger was broken; these use `unmount()`. The
+  // actual settle-wait, release ordering, and respawn now live on main and
+  // in the durable TerminalPane listener (omp-rpc-session-owner.test.ts and
+  // use-omp-rpc-chat-handback-listener.test.ts) — this hook only expresses
+  // intent and returns.
+  describe('hand-back to Terminal view (Critical B)', () => {
+    it('requests release with respawn context on real unmount, and never aborts the turn itself', async () => {
+      acquire.mockResolvedValue({ ok: true })
+      const { result, unmount } = renderHook(() => useOmpRpcChatSession(BASE_ARGS))
       await waitFor(() => expect(result.current.status).toBe('acquired'))
       act(() => {
         lastSubscribedListener()({ kind: 'agent-start', frame: { type: 'agent_start' } })
       })
       expect(result.current.turnState.status).toBe('working')
 
-      rerender({ ...BASE_ARGS, isVisible: false })
-
-      // Give the initial deferral tick + at least one settle-poll tick a
-      // real chance to elapse; the turn is still working, so release must
-      // not have fired yet — Decision 1 never aborts a live turn.
-      await new Promise((resolve) => setTimeout(resolve, 600))
-      expect(release).not.toHaveBeenCalled()
-      expect(result.current.turnState.status).toBe('working')
-
-      act(() => {
-        lastSubscribedListener()({
-          kind: 'agent-end',
-          frame: { type: 'agent_end', isTerminal: true }
-        })
-      })
-
-      await waitFor(() => expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' }), {
-        timeout: 2000
-      })
-      await waitFor(() => expect(respawnPtyForOmpRpcChatHandback).toHaveBeenCalledTimes(1), {
-        timeout: 2000
-      })
-    })
-
-    it('cancels the pending hand-back when the pane returns to Chat view first', async () => {
-      acquire.mockResolvedValue({ ok: true })
-      const { result, rerender } = renderHook(
-        (props: UseOmpRpcChatSessionArgs) => useOmpRpcChatSession(props),
-        { initialProps: BASE_ARGS }
-      )
-      await waitFor(() => expect(result.current.status).toBe('acquired'))
-
-      rerender({ ...BASE_ARGS, isVisible: false })
-      rerender({ ...BASE_ARGS, isVisible: true })
-
-      // Wait well past the deferral tick to prove the cancellation held, not
-      // just that the assertion ran before the tick fired.
-      await new Promise((resolve) => setTimeout(resolve, 600))
-      expect(release).not.toHaveBeenCalled()
-      expect(respawnPtyForOmpRpcChatHandback).not.toHaveBeenCalled()
-      expect(result.current.status).toBe('acquired')
-    })
-
-    it('does not respawn when release reports it was already unowned', async () => {
-      acquire.mockResolvedValue({ ok: true })
-      release.mockResolvedValue({ released: false })
-      const { result, rerender } = renderHook(
-        (props: UseOmpRpcChatSessionArgs) => useOmpRpcChatSession(props),
-        { initialProps: BASE_ARGS }
-      )
-      await waitFor(() => expect(result.current.status).toBe('acquired'))
-
-      rerender({ ...BASE_ARGS, isVisible: false })
-
-      await waitFor(() => expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' }), {
-        timeout: 2000
-      })
-      await new Promise((resolve) => setTimeout(resolve, 300))
-      expect(respawnPtyForOmpRpcChatHandback).not.toHaveBeenCalled()
-    })
-
-    it('never fires hand-back on unmount — pane close must not spawn a new PTY', async () => {
-      acquire.mockResolvedValue({ ok: true })
-      const { result, unmount } = renderHook(() => useOmpRpcChatSession(BASE_ARGS))
-      await waitFor(() => expect(result.current.status).toBe('acquired'))
-
       unmount()
 
-      expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' })
-      await new Promise((resolve) => setTimeout(resolve, 600))
-      expect(respawnPtyForOmpRpcChatHandback).not.toHaveBeenCalled()
+      // Why: aborting a live turn is main's call now (handoffToPty's
+      // allowAbort opt-in, gated by main owning the settle-wait) — never
+      // this hook's. It only expresses intent and returns.
+      expect(abort).not.toHaveBeenCalled()
+      expect(release).toHaveBeenCalledWith({
+        paneKey: 'tab-1:11111111-1111-4111-8111-111111111111',
+        respawn: { replacedPtyId: 'pty-1', cwd: '/work/a', sessionId: 'session-1' }
+      })
+    })
+
+    it('does not attach respawn context when a protocol fault releases the session', async () => {
+      acquire.mockResolvedValue({ ok: true })
+      const { result } = renderHook(() => useOmpRpcChatSession(BASE_ARGS))
+      await waitFor(() => expect(result.current.status).toBe('acquired'))
+
+      act(() => {
+        lastSubscribedListener()({ kind: 'exit', code: 1, signal: null })
+      })
+
+      await waitFor(() =>
+        expect(release).toHaveBeenCalledWith({
+          paneKey: 'tab-1:11111111-1111-4111-8111-111111111111'
+        })
+      )
+      expect(release).not.toHaveBeenCalledWith(
+        expect.objectContaining({ respawn: expect.anything() })
+      )
     })
   })
 })

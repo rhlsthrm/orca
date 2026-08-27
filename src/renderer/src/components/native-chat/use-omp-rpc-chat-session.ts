@@ -1,14 +1,20 @@
-// Binds one pane to an RPC-owned OMP chat session (wave 4: kill-and-resume
+// Binds one pane to an RPC-owned OMP chat session (wave 4/5: kill-and-resume
 // acquisition, Decision 1). Chat-view activation acquires a live PTY-hosted
 // OMP session by killing that PTY and resuming it in an RPC child, holding
-// RPC ownership for the pane's life; leaving Chat view releases it and
-// respawns a PTY resuming the same session, deferred until any in-flight
-// turn settles (never abort-and-release — the F9 rule, extended rather than
-// relaxed by Decision 1). Every other agent, and every OMP pane that fails
-// to acquire, is a pure no-op here — the caller degrades to today's PTY+
-// transcript behavior (D1).
+// RPC ownership for the pane's life. Leaving Chat view (this hook
+// unmounting — TerminalPane.tsx's portal render gate returning null, NOT an
+// `isVisible` prop flip on a persistently-mounted instance) fires this same
+// acquire effect's cleanup, which asks main to release + hand the pane back
+// once any in-flight turn settles. Main owns that settle-wait (wave 5); the
+// actual PTY respawn is driven from TerminalPane (an always-mounted
+// surface), not from this (un)mountable hook — see
+// use-omp-rpc-chat-handback-listener.ts and docs/omp-rpc-chat-adapter-plan.md's
+// Decision 1 (wave 5 amendment) for why. Every other agent, and every OMP
+// pane that fails to acquire, is a pure no-op here — the caller degrades to
+// today's PTY+transcript behavior (D1).
 
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
+import { useAppStore } from '@/store'
 import type { AgentType } from '../../../../shared/agent-status-types'
 import type {
   OmpRpcChatAcquireFailureReason,
@@ -20,11 +26,10 @@ import type {
   OmpRpcExtensionUiResponse,
   OmpRpcImageContent
 } from '../../../../shared/omp-rpc-protocol'
+import { parsePaneKey } from '../../../../shared/stable-pane-id'
 import { isOmpRpcCatalogAgent } from './use-omp-rpc-commands'
-import { respawnPtyForOmpRpcChatHandback } from './omp-rpc-chat-handback'
 import {
   createInitialOmpRpcTurnState,
-  isOmpRpcTurnActive,
   ompRpcTurnReducer,
   type OmpRpcTurnAction,
   type OmpRpcTurnState
@@ -133,12 +138,6 @@ function subscribeOmpRpcChatFrames(
  *  looping forever on a genuine, persistent conflict. */
 const CONFLICT_RETRY_DELAY_MS = 250
 
-/** Deferred hand-back's initial wait and turn-settle poll interval — real
- *  enough that a same-tick flip back to Chat view (a user glancing at
- *  Terminal and immediately returning) is absorbed before any observable
- *  side effect runs (see the hand-back effect below). */
-const HANDBACK_SETTLE_POLL_MS = 250
-
 function delay(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>()
   setTimeout(resolve, ms)
@@ -149,8 +148,31 @@ function delay(ms: number): Promise<void> {
  *  for the eventual hand-back) so the registry's existing exit-proof gate —
  *  unchanged — sees it as exited and proceeds. Best-effort: an already-dead
  *  PTY or a transient kill failure must not block acquisition; the registry's
- *  liveness check is the actual proof gate and fails closed on its own. */
-async function killPtyBeforeOmpRpcAcquire(ptyId: string): Promise<void> {
+ *  liveness check is the actual proof gate and fails closed on its own.
+ *
+ *  Why (Critical A, cross-lab review): every OTHER intentional-kill site in
+ *  this codebase (codex-detached-pane-restart.ts, the hibernation/sleep
+ *  flows) suppresses the pty:exit before killing a PTY it means to replace,
+ *  so pty-exit-hibernate.ts's onExit lands on its suppressed branch instead
+ *  of the "process died" teardown, which — for the ordinary single-pane tab
+ *  — closes the whole tab (`panes.length <= 1` -> `onPtyExitRef.current` ->
+ *  `closeTerminalTab`). This function used to skip suppression entirely.
+ *  The suppression flag is left ARMED here, not self-consumed: onExit
+ *  itself must be the one to consume it once the real exit round-trips
+ *  back — self-consuming now would leave that later, real exit unsuppressed
+ *  and fall through to the same tab-close bug. `clearTabPtyId` is also
+ *  called proactively, putting the tab into a well-defined "RPC-owned, no
+ *  PTY" state immediately rather than waiting on the kill's async round
+ *  trip — onExit's own cleanup would eventually do this too (gated only on
+ *  `preserveRendererBinding`, which this never sets), just not until the
+ *  daemon confirms the exit. */
+async function killPtyBeforeOmpRpcAcquire(paneKey: string, ptyId: string): Promise<void> {
+  const store = useAppStore.getState()
+  store.suppressPtyExit(ptyId)
+  const parsed = parsePaneKey(paneKey)
+  if (parsed) {
+    store.clearTabPtyId(parsed.tabId, ptyId)
+  }
   try {
     await window.api?.pty?.kill(ptyId, { keepHistory: true })
   } catch {
@@ -169,10 +191,6 @@ export function useOmpRpcChatSession(args: UseOmpRpcChatSessionArgs): OmpRpcChat
   // Read inside stable callbacks below without adding `status` to their deps.
   const statusRef = useRef(status)
   statusRef.current = status
-  // Read inside the hand-back effect's settle-poll loop below, which must
-  // not add `turnState` to its own deps (it changes on every frame).
-  const turnStateRef = useRef(turnState)
-  turnStateRef.current = turnState
   // Why (F9): visibility gates the FIRST acquisition (don't spawn an RPC
   // child for a pane whose Chat view has never been opened) but must never
   // trigger release on its own afterward — toggling Chat -> Terminal and
@@ -226,6 +244,20 @@ export function useOmpRpcChatSession(args: UseOmpRpcChatSessionArgs): OmpRpcChat
     let acquiredThisEffect = false
     setStatus('pending')
 
+    // Critical B: expresses hand-back intent to main alongside every
+    // release this effect fires — whether from cleanup (unmount: leave
+    // Chat view, pane close, app quit) or from the cancelled-before-acquired
+    // race below. Main decides whether a respawn actually happens (only
+    // once release genuinely settles+exits, via the `ompRpcChat:handback`
+    // push event); this hook never waits for or drives the respawn itself —
+    // see use-omp-rpc-chat-handback-listener.ts, which TerminalPane (an
+    // always-mounted surface) subscribes to for exactly that reason.
+    const respawnContext = {
+      replacedPtyId: ptyId as string,
+      cwd: cwd as string,
+      sessionId: sessionFile as string
+    }
+
     const acquireOnce = (): Promise<OmpRpcChatAcquireResult> =>
       api
         .acquire({
@@ -248,6 +280,9 @@ export function useOmpRpcChatSession(args: UseOmpRpcChatSessionArgs): OmpRpcChat
       unsubscribe?.()
       unsubscribe = null
       acquiredThisEffect = false
+      // Why no respawn context: a protocol fault/exit means the RPC child
+      // itself already died — there is no live turn to hand back, only a
+      // dead claim to release, so this stays a bare release.
       void api.release({ paneKey }).catch(() => {})
     }
 
@@ -257,7 +292,7 @@ export function useOmpRpcChatSession(args: UseOmpRpcChatSessionArgs): OmpRpcChat
       // happened to exit on its own). Kill it first so the unchanged
       // exit-proof gate inside acquireOnce() sees a genuinely exited PTY.
       if (!cancelled) {
-        await killPtyBeforeOmpRpcAcquire(ptyId as string)
+        await killPtyBeforeOmpRpcAcquire(paneKey, ptyId as string)
       }
       let result = await acquireOnce()
       if (!result.ok && result.reason === 'conflict' && !cancelled) {
@@ -278,9 +313,12 @@ export function useOmpRpcChatSession(args: UseOmpRpcChatSessionArgs): OmpRpcChat
       if (cancelled) {
         // The pane unmounted, went invisible-before-ever-visible, or
         // rebound identity while the acquisition was in flight — never
-        // leave a just-acquired child holding the session hostage.
+        // leave a just-acquired child holding the session hostage, and
+        // never strand the pane without a PTY: its live one was already
+        // killed above, so ask for the same hand-back a normal unmount
+        // would.
         if (result.ok) {
-          void api.release({ paneKey }).catch(() => {})
+          void api.release({ paneKey, respawn: respawnContext }).catch(() => {})
         }
         return
       }
@@ -299,57 +337,10 @@ export function useOmpRpcChatSession(args: UseOmpRpcChatSessionArgs): OmpRpcChat
       unsubscribe = null
       if (acquiredThisEffect) {
         acquiredThisEffect = false
-        void api.release({ paneKey }).catch(() => {})
+        void api.release({ paneKey, respawn: respawnContext }).catch(() => {})
       }
     }
   }, [eligible, paneKey, ptyId, cwd, sessionFile])
-
-  // Decision 1's hand-back, reconciled with F9: leaving Chat view
-  // (`isVisible` drops false) while RPC still owns the session schedules a
-  // release + PTY respawn — but only after any in-flight turn settles,
-  // never an abort-and-release. Deferred by at least one real tick before
-  // touching anything observable, so a fleeting glance at Terminal view and
-  // straight back (isVisible false then true before this runs) is a pure
-  // no-op, not a wasted kill+respawn (the same flicker concern documented in
-  // sleep-worktree-flow.ts). Deliberately a separate effect from the acquire
-  // effect above so F9's "visibility never touches acquire/release" holds
-  // for that effect unchanged; this one owns exactly the new trigger.
-  useEffect(() => {
-    if (isVisible || status !== 'acquired') {
-      return
-    }
-    const api = window.api?.ompRpcChat
-    if (!api) {
-      return
-    }
-    let cancelled = false
-    const handbackPtyId = ptyId as string
-    const handbackCwd = cwd as string
-    const handbackSessionId = sessionFile as string
-    void (async () => {
-      await delay(HANDBACK_SETTLE_POLL_MS)
-      while (!cancelled && isOmpRpcTurnActive(turnStateRef.current)) {
-        await delay(HANDBACK_SETTLE_POLL_MS)
-      }
-      if (cancelled) {
-        return
-      }
-      const releaseResult = await api.release({ paneKey }).catch(() => ({ released: false }))
-      if (cancelled || !releaseResult.released) {
-        return
-      }
-      setStatus('idle')
-      await respawnPtyForOmpRpcChatHandback({
-        paneKey,
-        replacedPtyId: handbackPtyId,
-        cwd: handbackCwd,
-        sessionId: handbackSessionId
-      })
-    })()
-    return () => {
-      cancelled = true
-    }
-  }, [isVisible, status, paneKey, ptyId, cwd, sessionFile])
 
   const send = useCallback(
     (sendArgs: OmpRpcChatSessionSendArgs): Promise<OmpRpcChatSendResult> => {
