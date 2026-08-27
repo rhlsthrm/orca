@@ -1,4 +1,8 @@
-import type { OmpRpcReadyFrame, OmpRpcSlashCommand } from '../../shared/omp-rpc-protocol'
+import type {
+  OmpRpcReadyFrame,
+  OmpRpcSessionState,
+  OmpRpcSlashCommand
+} from '../../shared/omp-rpc-protocol'
 import {
   OMP_RPC_MAX_FRAME_BYTES,
   OMP_RPC_MAX_REASSEMBLED_FRAME_BYTES,
@@ -44,4 +48,19 @@ export function parseOmpRpcCommandsData(data: unknown): OmpRpcSlashCommand[] {
     throw new Error('OMP RPC command catalog response was malformed')
   }
   return parseOmpRpcCommands(data.commands)
+}
+
+export function parseOmpRpcSessionState(data: unknown): OmpRpcSessionState {
+  if (
+    !isOmpRpcObject(data) ||
+    (typeof data.sessionFile !== 'string' && data.sessionFile !== null) ||
+    (typeof data.sessionId !== 'string' && data.sessionId !== null) ||
+    typeof data.isStreaming !== 'boolean' ||
+    typeof data.isCompacting !== 'boolean' ||
+    !Number.isSafeInteger(data.queuedMessageCount) ||
+    (data.queuedMessageCount as number) < 0
+  ) {
+    throw new Error('OMP RPC session state response was malformed')
+  }
+  return data as OmpRpcSessionState
 }

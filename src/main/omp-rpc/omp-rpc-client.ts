@@ -1,11 +1,11 @@
 import type {
   OmpRpcCommand,
   OmpRpcClientEvent,
-  OmpRpcClientLike,
   OmpRpcChunkFrame,
   OmpRpcReadyFrame,
   OmpRpcSlashCommand,
-  OmpRpcSpawnOptions
+  OmpRpcSpawnOptions,
+  OmpSessionOwningRpcClient
 } from '../../shared/omp-rpc-protocol'
 import { OmpRpcChunkReassembler } from './omp-rpc-chunk-reassembler'
 import { OmpRpcCommandError, type OmpRpcPendingResponse } from './omp-rpc-command-correlation'
@@ -16,6 +16,8 @@ import {
   parseOmpRpcReadyFrame
 } from './omp-rpc-frame-validation'
 import { OmpRpcProcessTransport } from './omp-rpc-process-transport'
+import { OmpRpcProcessExit } from './omp-rpc-process-exit'
+import { OmpRpcSessionCommands } from './omp-rpc-session-commands'
 import { OMP_RPC_PROTOCOL_VERSION } from './omp-rpc-transport-limits'
 
 const MALFORMED_LINE_EXCERPT_CHARS = 200
@@ -25,12 +27,13 @@ type ReadyResult = {
   negotiatedProtocolVersion: number
 }
 
-export class OmpRpcClient implements OmpRpcClientLike {
+export class OmpRpcClient implements OmpSessionOwningRpcClient {
   private readonly transport: OmpRpcProcessTransport
   private readonly listeners = new Set<(event: OmpRpcClientEvent) => void>()
   private readonly readyPromise: Promise<ReadyResult>
   private resolveReady!: (result: ReadyResult) => void
   private rejectReady!: (error: Error) => void
+  private readonly processExit: OmpRpcProcessExit
   private readyFrame: OmpRpcReadyFrame | null = null
   private readonly pendingResponses = new Map<string, OmpRpcPendingResponse>()
   private readonly chunkReassembler = new OmpRpcChunkReassembler()
@@ -38,7 +41,10 @@ export class OmpRpcClient implements OmpRpcClientLike {
   private isProtocolV2 = false
   private hasProtocolFault = false
   private isDisposed = false
-  private hasExited = false
+  readonly getState: OmpSessionOwningRpcClient['getState']
+  readonly switchSession: OmpSessionOwningRpcClient['switchSession']
+  readonly abort: OmpSessionOwningRpcClient['abort']
+  readonly whenExited: OmpSessionOwningRpcClient['whenExited']
 
   constructor(options: OmpRpcSpawnOptions) {
     this.readyPromise = new Promise<ReadyResult>((resolve, reject) => {
@@ -46,10 +52,26 @@ export class OmpRpcClient implements OmpRpcClientLike {
       this.rejectReady = reject
     })
     this.readyPromise.catch(() => {})
+    this.processExit = new OmpRpcProcessExit({
+      getStderrTail: () => this.stderrTail,
+      isProtocolV2: () => this.isProtocolV2,
+      rejectReady: (error) => this.rejectReady(error),
+      rejectPendingResponses: (error) => this.rejectPendingResponses(error),
+      emit: (event) => this.emit(event),
+      clearListeners: () => this.listeners.clear()
+    })
+    this.whenExited = this.processExit.whenExited
+    const sessionCommands = new OmpRpcSessionCommands({
+      whenReady: () => this.whenReady(),
+      sendCommand: (command) => this.sendCommand(command)
+    })
+    this.getState = sessionCommands.getState
+    this.switchSession = sessionCommands.switchSession
+    this.abort = sessionCommands.abort
     this.transport = new OmpRpcProcessTransport(options, {
       onLine: this.handleLine,
       onStreamError: this.handleStreamError,
-      onExit: this.handleProcessExit
+      onExit: this.processExit.handle
     })
   }
 
@@ -205,7 +227,7 @@ export class OmpRpcClient implements OmpRpcClientLike {
   }
 
   private sendCommand(command: OmpRpcCommand): Promise<unknown> {
-    if (this.isDisposed || this.hasExited || this.hasProtocolFault) {
+    if (this.isDisposed || this.processExit.hasExited || this.hasProtocolFault) {
       return Promise.reject(new Error('OMP RPC client is not available'))
     }
     const id = `orca-omp-${++this.requestNumber}`
@@ -259,29 +281,6 @@ export class OmpRpcClient implements OmpRpcClientLike {
       this.rejectReady(error)
     }
     this.rejectPendingResponses(error)
-  }
-
-  private readonly handleProcessExit = (
-    code: number | null,
-    signal: NodeJS.Signals | null,
-    cause?: Error
-  ): void => {
-    if (this.hasExited) {
-      return
-    }
-    this.hasExited = true
-    const status = code !== null ? `code ${code}` : signal ? `signal ${signal}` : 'unknown status'
-    const diagnostics = this.stderrTail.trim()
-    const error = new Error(
-      cause?.message ??
-        `OMP RPC child exited with ${status}${diagnostics ? `: ${diagnostics}` : ''}`
-    )
-    this.rejectPendingResponses(error)
-    if (!this.isProtocolV2) {
-      this.rejectReady(error)
-    }
-    this.emit({ kind: 'exit', code, signal })
-    this.listeners.clear()
   }
 
   private rejectPendingResponses(error: Error): void {

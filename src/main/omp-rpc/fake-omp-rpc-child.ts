@@ -1,5 +1,9 @@
 import { join } from 'node:path'
-import type { OmpRpcSlashCommand, OmpRpcSpawnOptions } from '../../shared/omp-rpc-protocol'
+import type {
+  OmpRpcSessionState,
+  OmpRpcSlashCommand,
+  OmpRpcSpawnOptions
+} from '../../shared/omp-rpc-protocol'
 
 export type FakeOmpRpcScenario = {
   firstFrame?: unknown
@@ -7,7 +11,10 @@ export type FakeOmpRpcScenario = {
   afterNegotiationFrames?: unknown[]
   commands?: OmpRpcSlashCommand[]
   commandErrors?: Partial<
-    Record<'get_available_commands' | 'prompt', { error: string; code?: string }>
+    Record<
+      'abort' | 'get_available_commands' | 'get_state' | 'prompt' | 'switch_session',
+      { error: string; code?: string }
+    >
   >
   promptOutput?: string[]
   promptResultAgentInvoked?: boolean
@@ -23,6 +30,8 @@ export type FakeOmpRpcScenario = {
   exitCode?: number
   stderrBeforeExit?: string
   sigtermMarkerPath?: string
+  argvMarkerPath?: string
+  sessionState?: OmpRpcSessionState
 }
 
 export type FakeOmpRpcChild = {
@@ -30,20 +39,38 @@ export type FakeOmpRpcChild = {
   spawnOptions: OmpRpcSpawnOptions
 }
 
-export function createFakeOmpRpcChild(scenario: FakeOmpRpcScenario): FakeOmpRpcChild {
+export function createFakeOmpRpcChild(
+  scenario: FakeOmpRpcScenario,
+  sessionMode: 'session-less' | 'session-owning' = 'session-less'
+): FakeOmpRpcChild {
   const fixtureDirectory = join(process.cwd(), 'src', 'main', 'omp-rpc')
   const scriptPath = join(fixtureDirectory, 'fake-omp-rpc-child-script.mjs')
   const executablePath =
     process.platform === 'win32' ? join(fixtureDirectory, 'fake-omp-rpc-child.cmd') : scriptPath
   const scenarioJson = JSON.stringify(scenario)
-  const rpcArgs = ['--mode', 'rpc', '--no-session', scenarioJson]
+  const rpcArgs = [
+    '--mode',
+    'rpc',
+    ...(sessionMode === 'session-less' ? ['--no-session'] : []),
+    scenarioJson
+  ]
+  const spawnOptions: OmpRpcSpawnOptions =
+    sessionMode === 'session-owning'
+      ? {
+          executablePath,
+          cwd: process.cwd(),
+          sessionMode,
+          extraArgs: [scenarioJson]
+        }
+      : {
+          executablePath,
+          cwd: process.cwd(),
+          sessionMode,
+          noSession: true,
+          extraArgs: [scenarioJson]
+        }
   return {
     argv: [process.execPath, scriptPath, ...rpcArgs],
-    spawnOptions: {
-      executablePath,
-      cwd: process.cwd(),
-      noSession: true,
-      extraArgs: [scenarioJson]
-    }
+    spawnOptions
   }
 }

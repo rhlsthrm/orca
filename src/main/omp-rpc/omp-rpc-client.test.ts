@@ -2,6 +2,7 @@ import { mkdtemp, readFile, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import { afterEach, describe, expect, it, vi } from 'vitest'
+import type { OmpRpcSessionState } from '../../shared/omp-rpc-protocol'
 import { createFakeOmpRpcChild } from './fake-omp-rpc-child'
 import { spawnOmpRpcClient, type OmpRpcClient } from './omp-rpc-client'
 
@@ -10,6 +11,12 @@ const temporaryDirectories = new Set<string>()
 
 function spawnScenario(scenario: Parameters<typeof createFakeOmpRpcChild>[0]): OmpRpcClient {
   const client = spawnOmpRpcClient(createFakeOmpRpcChild(scenario).spawnOptions)
+  clients.add(client)
+  return client
+}
+
+function spawnSessionScenario(scenario: Parameters<typeof createFakeOmpRpcChild>[0]): OmpRpcClient {
+  const client = spawnOmpRpcClient(createFakeOmpRpcChild(scenario, 'session-owning').spawnOptions)
   clients.add(client)
   return client
 }
@@ -69,6 +76,57 @@ describe('OMP RPC client negotiation', () => {
     await expect(client.whenReady()).rejects.toThrow(
       'OMP RPC protocol v2 negotiation failed: Protocol rejected'
     )
+  })
+
+  it('omits --no-session only for an explicit session-owning spawn', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'orca-omp-rpc-'))
+    temporaryDirectories.add(directory)
+    const argvMarkerPath = join(directory, 'argv.json')
+    const client = spawnSessionScenario({ argvMarkerPath })
+
+    await client.whenReady()
+
+    await expect
+      .poll(async () => JSON.parse(await readFile(argvMarkerPath, 'utf8')))
+      .toEqual(['--mode', 'rpc'])
+  })
+
+  it('rejects --no-session in session-owning extra arguments', () => {
+    const fake = createFakeOmpRpcChild({}, 'session-owning')
+    let client: OmpRpcClient | undefined
+
+    try {
+      expect(() => {
+        client = spawnOmpRpcClient({
+          ...fake.spawnOptions,
+          extraArgs: ['--no-session', ...(fake.spawnOptions.extraArgs ?? [])]
+        })
+      }).toThrow('session-owning OMP RPC spawn cannot include --no-session')
+    } finally {
+      client?.dispose()
+    }
+  })
+})
+
+describe('OMP RPC session ownership commands', () => {
+  it('reads state, aborts streaming work, and switches the owned session', async () => {
+    const streamingState: OmpRpcSessionState = {
+      sessionFile: '/sessions/first.jsonl',
+      sessionId: 'session-first',
+      isStreaming: true,
+      isCompacting: false,
+      queuedMessageCount: 0
+    }
+    const client = spawnSessionScenario({ sessionState: streamingState })
+    await client.whenReady()
+
+    await expect(client.getState()).resolves.toEqual(streamingState)
+    await client.abort()
+    await expect(client.getState()).resolves.toMatchObject({ isStreaming: false })
+    await client.switchSession('/sessions/second.jsonl')
+    await expect(client.getState()).resolves.toMatchObject({
+      sessionFile: '/sessions/second.jsonl'
+    })
   })
 })
 
@@ -254,6 +312,7 @@ describe('OMP RPC transport lifecycle', () => {
     client.dispose()
 
     await vi.waitFor(async () => expect(await readFile(markerPath, 'utf8')).toBe('SIGTERM'))
+    await expect(client.whenExited()).resolves.toMatchObject({ code: 0, signal: null })
     await vi.waitFor(() => expect(exits).toHaveLength(1))
   })
 })

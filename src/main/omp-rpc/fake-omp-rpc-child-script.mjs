@@ -4,6 +4,13 @@ import { appendFileSync } from 'node:fs'
 import { createInterface } from 'node:readline'
 
 const scenario = JSON.parse(process.argv.at(-1) ?? '{}')
+let sessionState = scenario.sessionState ?? {
+  sessionFile: null,
+  sessionId: null,
+  isStreaming: false,
+  isCompacting: false,
+  queuedMessageCount: 0
+}
 const readyFrame = {
   type: 'ready',
   protocolVersion: 1,
@@ -17,6 +24,10 @@ if (scenario.sigtermMarkerPath) {
     appendFileSync(scenario.sigtermMarkerPath, 'SIGTERM')
     process.exit(0)
   })
+}
+
+if (scenario.argvMarkerPath) {
+  appendFileSync(scenario.argvMarkerPath, JSON.stringify(process.argv.slice(2, -1)))
 }
 
 function writeLine(frame) {
@@ -80,6 +91,41 @@ input.on('line', (line) => {
       command: 'get_available_commands',
       success: true,
       data: { commands: scenario.commands ?? [] }
+    })
+    return
+  }
+  if (command.type === 'get_state') {
+    writeLine({
+      id: command.id,
+      type: 'response',
+      command: 'get_state',
+      success: true,
+      data: sessionState
+    })
+    return
+  }
+  if (command.type === 'abort') {
+    sessionState = {
+      ...sessionState,
+      isStreaming: false,
+      isCompacting: false,
+      queuedMessageCount: 0
+    }
+    writeLine({
+      id: command.id,
+      type: 'response',
+      command: 'abort',
+      success: true
+    })
+    return
+  }
+  if (command.type === 'switch_session') {
+    sessionState = { ...sessionState, sessionFile: command.sessionPath }
+    writeLine({
+      id: command.id,
+      type: 'response',
+      command: 'switch_session',
+      success: true
     })
     return
   }

@@ -22,12 +22,18 @@ export class OmpRpcProcessTransport {
     options: OmpRpcSpawnOptions,
     private readonly handlers: OmpRpcProcessTransportHandlers
   ) {
+    if (
+      options.sessionMode === 'session-owning' &&
+      options.extraArgs?.some((arg) => arg === '--no-session' || arg.startsWith('--no-session='))
+    ) {
+      throw new Error('session-owning OMP RPC spawn cannot include --no-session')
+    }
     this.child = spawnProcess({
       program: options.executablePath,
       args: [
         '--mode',
         'rpc',
-        ...(options.noSession ? ['--no-session'] : []),
+        ...(options.sessionMode === 'session-owning' ? [] : ['--no-session']),
         ...(options.extraArgs ?? [])
       ],
       cwd: options.cwd,

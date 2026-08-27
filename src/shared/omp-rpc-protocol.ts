@@ -62,6 +62,19 @@ export type OmpRpcResponseFrame = {
   code?: string
 }
 
+export type OmpRpcSessionState = {
+  sessionFile: string | null
+  sessionId: string | null
+  isStreaming: boolean
+  isCompacting: boolean
+  queuedMessageCount: number
+}
+
+export type OmpRpcExit = {
+  code: number | null
+  signal: string | null
+}
+
 /** Frames this integration understands today; everything else stays OmpRpcUnknownFrame. */
 export type OmpRpcKnownServerFrame =
   | OmpRpcReadyFrame
@@ -76,10 +89,12 @@ export type OmpRpcUnknownFrame = { type: string } & Record<string, unknown>
 
 export type OmpRpcServerFrame = OmpRpcKnownServerFrame | OmpRpcUnknownFrame
 
-/** Client->server commands used by milestone 1. */
+/** Client->server commands consumed by this integration. */
 export type OmpRpcCommand =
   | { id?: string; type: 'negotiate_protocol'; protocolVersion: number }
   | { id?: string; type: 'get_available_commands' }
+  | { id?: string; type: 'get_state' }
+  | { id?: string; type: 'switch_session'; sessionPath: string }
   | { id?: string; type: 'prompt'; message: string }
   | { id?: string; type: 'abort' }
 
@@ -102,15 +117,19 @@ export function isOmpRpcChunkFrame(frame: OmpRpcServerFrame): frame is OmpRpcChu
   return frame.type === 'rpc_chunk'
 }
 
-/** Launch options for a main-process OMP RPC child. `noSession: true` runs a
- *  session-less probe (catalog reads, local commands like /usage) that can never
- *  contend with a live TUI pane for a session file. */
-export type OmpRpcSpawnOptions = {
+/** Launch options for a main-process OMP RPC child. Session-less is the safe
+ *  default; owning a real session requires the explicit session-owning mode. */
+export type OmpRpcBaseSpawnOptions = {
   executablePath: string
   cwd: string
-  noSession?: boolean
   extraArgs?: string[]
 }
+
+export type OmpRpcSpawnOptions = OmpRpcBaseSpawnOptions &
+  (
+    | { sessionMode: 'session-owning'; noSession?: never }
+    | { sessionMode?: 'session-less'; noSession?: true }
+  )
 
 /** Contract between the IPC layer and the concrete client in src/main/omp-rpc/.
  *  The IPC layer codes against this type only. */
@@ -124,4 +143,11 @@ export type OmpRpcClientLike = {
   prompt(message: string): Promise<{ agentInvoked: boolean }>
   on(listener: (event: OmpRpcClientEvent) => void): () => void
   dispose(): void
+}
+
+export type OmpSessionOwningRpcClient = OmpRpcClientLike & {
+  getState(): Promise<OmpRpcSessionState>
+  switchSession(sessionPath: string): Promise<void>
+  abort(): Promise<void>
+  whenExited(): Promise<OmpRpcExit>
 }
