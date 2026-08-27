@@ -12,6 +12,7 @@ import { useNativeChatCanSend } from './use-native-chat-can-send'
 import { NativeChatInteractiveCard } from './NativeChatInteractiveCard'
 import { NativeChatExtensionUiCard } from './NativeChatExtensionUiCard'
 import { useNativeChatOmpRpcIntegration } from './use-native-chat-omp-rpc-integration'
+import { useOmpPaneSessionIdentity } from './use-omp-pane-session-identity'
 import { useOmpRpcProbeCwd } from './use-omp-rpc-commands'
 import { NativeChatEmptyState } from './NativeChatEmptyState'
 import { NativeChatSessionGate } from './NativeChatSessionGate'
@@ -131,6 +132,17 @@ function NativeChatResolvedView({
     enabled: isVisible
   })
   const ompRpcCwd = useOmpRpcProbeCwd(agent, terminalTabId)
+  // Decision 2: resolved from OMP's own on-disk state (terminal breadcrumb,
+  // then newest-by-mtime cwd bucket), bypassing the broken agent-status hook
+  // chain that `sessionId` above depends on for omp panes (#8962). Null
+  // means nothing to resume yet, which correctly keeps acquisition closed.
+  const ompRpcResolvedSessionId = useOmpPaneSessionIdentity({
+    agent,
+    ptyId: targetPtyId,
+    cwd: ompRpcCwd,
+    runtimeEnvironmentId,
+    isVisible
+  })
   // The agent's in-progress reply preview (hook), shown as a live streaming
   // bubble while it works — before the completed turn flushes to the transcript.
   // Read here (rather than at first use) so the RPC integration below can
@@ -141,9 +153,7 @@ function NativeChatResolvedView({
     paneKey,
     ptyId: targetPtyId,
     cwd: ompRpcCwd,
-    // OMP resumes by session id, not a transcript path (see
-    // use-omp-rpc-chat-session.ts) — sessionId is what's actually known here.
-    sessionFile: sessionId,
+    sessionFile: ompRpcResolvedSessionId,
     isVisible,
     runtimeEnvironmentId,
     transcriptMessages: session.messages,
