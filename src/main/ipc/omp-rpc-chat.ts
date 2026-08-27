@@ -14,6 +14,8 @@ import type {
   OmpRpcChatEventPayload,
   OmpRpcChatReleaseArgs,
   OmpRpcChatReleaseResult,
+  OmpRpcChatResolveSessionIdentityArgs,
+  OmpRpcChatResolveSessionIdentityResult,
   OmpRpcChatRespondExtensionUiArgs,
   OmpRpcChatSendArgs,
   OmpRpcChatSendResult,
@@ -21,11 +23,13 @@ import type {
   OmpRpcChatUnsubscribeArgs
 } from '../../shared/omp-rpc-chat-ipc-contract'
 import { OmpRpcChatSessionRegistry } from '../omp-rpc/omp-rpc-chat-session-registry'
+import type { IPtyProvider } from '../providers/pty-provider-contract'
 import { ptyOwnership } from './pty/provider/ownership-state'
 import { tryGetProviderForPty } from './pty/provider/registry'
 import { parseAppSshPtyId } from '../providers/ssh-pty-id'
 import { resolveOmpExecutablePath } from './omp-rpc'
 import { resolveSessionFilePath } from '../native-chat/session-file-resolver'
+import { resolveOmpPaneSessionIdentity } from '../native-chat/omp-terminal-session-identity'
 
 let registry: OmpRpcChatSessionRegistry | null = null
 
@@ -34,17 +38,21 @@ function getRegistry(): OmpRpcChatSessionRegistry {
   return registry
 }
 
-/** Read-only, local-only PTY liveness query — never kills anything. Explicitly
- *  refuses an SSH-owned id (returns null/unverifiable) rather than assuming
- *  local, per this milestone's local-runtime-only scope (AGENTS.md: gate
- *  cross-platform/remote behavior explicitly, never assume local). */
-function isLocalPtyAlive(ptyId: string): boolean | null {
+/** Local-only PTY provider lookup, refusing an SSH-owned id (returns null)
+ *  rather than assuming local, per this milestone's local-runtime-only scope
+ *  (AGENTS.md: gate cross-platform/remote behavior explicitly, never assume
+ *  local). Shared by the liveness check below and Part A's slave-path lookup. */
+function localPtyProvider(ptyId: string): IPtyProvider | null {
   const connectionId = ptyOwnership.get(ptyId)
   const parsedSshId = connectionId === undefined ? parseAppSshPtyId(ptyId) : null
   if (connectionId || parsedSshId) {
     return null
   }
-  const provider = tryGetProviderForPty(ptyId)
+  return tryGetProviderForPty(ptyId) ?? null
+}
+
+function isLocalPtyAlive(ptyId: string): boolean | null {
+  const provider = localPtyProvider(ptyId)
   if (!provider?.hasPty) {
     return null
   }
@@ -52,6 +60,19 @@ function isLocalPtyAlive(ptyId: string): boolean | null {
     return provider.hasPty(ptyId)
   } catch {
     return null
+  }
+}
+
+/** Read-only PTY slave/tty device path lookup, local-only (Part A session
+ *  identity resolution — deriving OMP's own terminal-id). Undefined means
+ *  "unknowable" (SSH/daemon pane, Windows, or the pty is already gone), and
+ *  the resolver falls straight to its mtime-fallback bucket scan. */
+function localGetSlavePath(ptyId: string): string | undefined {
+  const provider = localPtyProvider(ptyId)
+  try {
+    return provider?.getSlavePath?.(ptyId)
+  } catch {
+    return undefined
   }
 }
 
@@ -120,6 +141,31 @@ function handleSubscribe(event: IpcMainEvent, args: OmpRpcChatSubscribeArgs): vo
 }
 
 export function registerOmpRpcChatHandlers(): void {
+  ipcMain.handle(
+    'ompRpcChat:resolveSessionIdentity',
+    async (
+      _event,
+      args: OmpRpcChatResolveSessionIdentityArgs
+    ): Promise<OmpRpcChatResolveSessionIdentityResult> => {
+      const ptyId = args?.ptyId?.trim()
+      const cwd = args?.cwd?.trim()
+      if (!ptyId || !cwd) {
+        return null
+      }
+      try {
+        const resolved = await resolveOmpPaneSessionIdentity(
+          { ptyId, cwd },
+          { getSlavePath: localGetSlavePath }
+        )
+        return resolved ? { sessionId: resolved.sessionId, source: resolved.source } : null
+      } catch {
+        // Why: a filesystem read failure here must degrade to "nothing to
+        // resume" (D1), never propagate across the IPC boundary as a throw.
+        return null
+      }
+    }
+  )
+
   ipcMain.handle(
     'ompRpcChat:acquire',
     async (_event, args: OmpRpcChatAcquireArgs): Promise<OmpRpcChatAcquireResult> => {

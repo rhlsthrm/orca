@@ -9,7 +9,8 @@ const {
   registryInstance,
   RegistryCtor,
   resolveOmpExecutablePath,
-  resolveSessionFilePath
+  resolveSessionFilePath,
+  resolveOmpPaneSessionIdentity
 } = vi.hoisted(() => {
   const registryInstance = {
     acquire: vi.fn(),
@@ -26,7 +27,8 @@ const {
       return registryInstance
     }),
     resolveOmpExecutablePath: vi.fn(),
-    resolveSessionFilePath: vi.fn()
+    resolveSessionFilePath: vi.fn(),
+    resolveOmpPaneSessionIdentity: vi.fn()
   }
 })
 
@@ -36,6 +38,7 @@ vi.mock('../omp-rpc/omp-rpc-chat-session-registry', () => ({
 }))
 vi.mock('./omp-rpc', () => ({ resolveOmpExecutablePath }))
 vi.mock('../native-chat/session-file-resolver', () => ({ resolveSessionFilePath }))
+vi.mock('../native-chat/omp-terminal-session-identity', () => ({ resolveOmpPaneSessionIdentity }))
 
 import { clearOmpRpcChatHandlersForTests, registerOmpRpcChatHandlers } from './omp-rpc-chat'
 
@@ -61,11 +64,13 @@ describe('OMP RPC chat IPC handlers', () => {
     vi.clearAllMocks()
     resolveOmpExecutablePath.mockResolvedValue('/usr/local/bin/omp')
     resolveSessionFilePath.mockResolvedValue('/sessions/a.jsonl')
+    resolveOmpPaneSessionIdentity.mockResolvedValue(null)
   })
 
-  it('registers acquire/release/send/abort/respond and the subscribe push channels', () => {
+  it('registers resolveSessionIdentity/acquire/release/send/abort/respond and the subscribe push channels', () => {
     registerOmpRpcChatHandlers()
     expect(handle.mock.calls.map(([channel]) => channel)).toEqual([
+      'ompRpcChat:resolveSessionIdentity',
       'ompRpcChat:acquire',
       'ompRpcChat:release',
       'ompRpcChat:send',
@@ -77,6 +82,38 @@ describe('OMP RPC chat IPC handlers', () => {
       'ompRpcChat:unsubscribe'
     ])
     expect(appOnce).toHaveBeenCalledWith('will-quit', expect.any(Function))
+  })
+
+  it('resolveSessionIdentity returns the resolved session, threading ptyId/cwd through', async () => {
+    resolveOmpPaneSessionIdentity.mockResolvedValue({
+      sessionId: 'session-1',
+      sessionFilePath: '/sessions/session-1.jsonl',
+      source: 'breadcrumb'
+    })
+    registerOmpRpcChatHandlers()
+    await expect(
+      invoke('ompRpcChat:resolveSessionIdentity', { ptyId: 'pty-1', cwd: '/work' })
+    ).resolves.toEqual({ sessionId: 'session-1', source: 'breadcrumb' })
+    expect(resolveOmpPaneSessionIdentity).toHaveBeenCalledWith(
+      { ptyId: 'pty-1', cwd: '/work' },
+      expect.objectContaining({ getSlavePath: expect.any(Function) })
+    )
+  })
+
+  it('resolveSessionIdentity returns null on missing args without resolving', async () => {
+    registerOmpRpcChatHandlers()
+    await expect(
+      invoke('ompRpcChat:resolveSessionIdentity', { ptyId: '', cwd: '/work' })
+    ).resolves.toBeNull()
+    expect(resolveOmpPaneSessionIdentity).not.toHaveBeenCalled()
+  })
+
+  it('resolveSessionIdentity fails closed to null when the resolver throws', async () => {
+    resolveOmpPaneSessionIdentity.mockRejectedValue(new Error('disk error'))
+    registerOmpRpcChatHandlers()
+    await expect(
+      invoke('ompRpcChat:resolveSessionIdentity', { ptyId: 'pty-1', cwd: '/work' })
+    ).resolves.toBeNull()
   })
 
   it('fails closed with executable-not-found when omp cannot be resolved', async () => {

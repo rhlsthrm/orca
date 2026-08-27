@@ -266,6 +266,8 @@ import type {
   OmpRpcChatEventPayload,
   OmpRpcChatReleaseArgs,
   OmpRpcChatReleaseResult,
+  OmpRpcChatResolveSessionIdentityArgs,
+  OmpRpcChatResolveSessionIdentityResult,
   OmpRpcChatRespondExtensionUiArgs,
   OmpRpcChatSendArgs,
   OmpRpcChatSendResult,
@@ -4579,6 +4581,10 @@ const api = {
   },
 
   ompRpcChat: {
+    resolveSessionIdentity: (
+      args: OmpRpcChatResolveSessionIdentityArgs
+    ): Promise<OmpRpcChatResolveSessionIdentityResult> =>
+      ipcRenderer.invoke('ompRpcChat:resolveSessionIdentity', args),
     acquire: (args: OmpRpcChatAcquireArgs): Promise<OmpRpcChatAcquireResult> =>
       ipcRenderer.invoke('ompRpcChat:acquire', args),
     release: (args: OmpRpcChatReleaseArgs): Promise<OmpRpcChatReleaseResult> =>

@@ -12,6 +12,23 @@ import type {
   OmpRpcStreamingBehavior
 } from './omp-rpc-protocol'
 
+/** Resolves an OMP pane's session identity from OMP's own on-disk state
+ *  (terminal breadcrumb, then newest-by-mtime cwd bucket) — bypasses the
+ *  broken agent-status hook chain entirely (Decision 2,
+ *  docs/omp-rpc-chat-adapter-plan.md). Called before `acquire`; a null
+ *  result means "nothing to resume" and the caller must not acquire. */
+export type OmpRpcChatResolveSessionIdentityArgs = {
+  ptyId: string
+  cwd: string
+}
+
+export type OmpRpcChatSessionIdentitySource = 'breadcrumb' | 'mtime-fallback'
+
+export type OmpRpcChatResolveSessionIdentityResult = {
+  sessionId: string
+  source: OmpRpcChatSessionIdentitySource
+} | null
+
 export type OmpRpcChatAcquireArgs = {
   paneKey: string
   ptyId: string

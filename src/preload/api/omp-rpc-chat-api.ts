@@ -4,6 +4,8 @@ import type {
   OmpRpcChatAcquireResult,
   OmpRpcChatReleaseArgs,
   OmpRpcChatReleaseResult,
+  OmpRpcChatResolveSessionIdentityArgs,
+  OmpRpcChatResolveSessionIdentityResult,
   OmpRpcChatRespondExtensionUiArgs,
   OmpRpcChatSendArgs,
   OmpRpcChatSendResult,
@@ -12,6 +14,12 @@ import type {
 import type { OmpRpcClientEvent } from '../../shared/omp-rpc-protocol'
 
 export type OmpRpcChatApi = {
+  /** Resolves a pane's OMP session identity from OMP's own on-disk state
+   *  (terminal breadcrumb, then newest-by-mtime cwd bucket) — bypasses the
+   *  broken agent-status hook chain. Null means nothing to resume. */
+  resolveSessionIdentity: (
+    args: OmpRpcChatResolveSessionIdentityArgs
+  ) => Promise<OmpRpcChatResolveSessionIdentityResult>
   /** Proof-gated acquisition of RPC ownership for a pane's OMP session.
    *  Fail-closed: `ok:false` means the caller must keep today's PTY behavior. */
   acquire: (args: OmpRpcChatAcquireArgs) => Promise<OmpRpcChatAcquireResult>
