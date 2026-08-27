@@ -16,23 +16,27 @@ import type { OmpRpcClientLike, OmpRpcSpawnOptions } from '../../shared/omp-rpc-
 import { createOmpRpcProbePool, type OmpRpcProbePool } from './omp-rpc-probe-pool'
 import { isCommandOnLocalPath } from './command-path-resolver'
 import { hydrateShellPathForAgentDetection } from './agent-detection-shell-path'
+import { hydrateShellPath, mergePathSegments } from '../startup/hydrate-shell-path'
+import { createOmpExecutableResolver } from './omp-rpc-executable-resolver'
 
 let pool: OmpRpcProbePool | null = null
-let shellPathHydration: Promise<void> | null = null
 
-/** OMP launches from PATH exactly as its TUI does, so the probe and the pane
- *  agree on which binary is "omp" — no second resolution rule to drift. */
-async function resolveOmpExecutablePath(): Promise<string | null> {
-  const command = TUI_AGENT_CONFIG.omp.launchCmd
-  if (await isCommandOnLocalPath(command)) {
-    return command
+/** OMP resolves from PATH exactly as its TUI does; the resolver only widens the
+ *  search (forced re-hydration, well-known installer paths) when the GUI PATH —
+ *  or a cold-start hydration timeout cached process-wide — hides the binary. */
+const resolveOmpExecutable = createOmpExecutableResolver({
+  isCommandOnPath: isCommandOnLocalPath,
+  hydrateShellPath: () => hydrateShellPathForAgentDetection(),
+  rehydrateShellPathForced: async () => {
+    const hydration = await hydrateShellPath({ force: true })
+    if (hydration.ok) {
+      mergePathSegments(hydration.segments)
+    }
   }
-  // Why: a GUI-launched Electron app inherits a sparse PATH (no ~/.local/bin,
-  // no version-manager shims), so retry once through the user's login shell
-  // before declaring the binary missing.
-  shellPathHydration ??= hydrateShellPathForAgentDetection()
-  await shellPathHydration
-  return (await isCommandOnLocalPath(command)) ? command : null
+})
+
+async function resolveOmpExecutablePath(): Promise<string | null> {
+  return resolveOmpExecutable(TUI_AGENT_CONFIG.omp.launchCmd)
 }
 
 async function spawnOmpRpcClientLazily(options: OmpRpcSpawnOptions): Promise<OmpRpcClientLike> {

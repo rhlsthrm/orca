@@ -132,9 +132,9 @@ describe('OMP RPC IPC handlers', () => {
     isCommandOnLocalPath.mockResolvedValueOnce(false).mockResolvedValueOnce(true)
     await expect(resolve('/work/a')).resolves.toBe('omp')
     expect(hydrateShellPath).toHaveBeenCalledTimes(1)
-
-    isCommandOnLocalPath.mockResolvedValue(false)
-    await expect(resolve('/work/a')).resolves.toBeNull()
+    // Exhaustive miss behavior (forced re-hydration, well-known installer
+    // locations, final null) is owned by omp-rpc-executable-resolver.test.ts —
+    // asserting it here would touch the real filesystem.
   })
 
   it('shares one pool across workspaces and disposes it on shutdown', async () => {
