@@ -12,13 +12,30 @@ export type FakeOmpRpcScenario = {
   commands?: OmpRpcSlashCommand[]
   commandErrors?: Partial<
     Record<
-      'abort' | 'get_available_commands' | 'get_state' | 'prompt' | 'switch_session',
+      | 'abort'
+      | 'get_available_commands'
+      | 'get_state'
+      | 'prompt'
+      | 'steer'
+      | 'follow_up'
+      | 'switch_session',
       { error: string; code?: string }
     >
   >
   promptOutput?: string[]
   promptResultAgentInvoked?: boolean
   promptAgentInvoked?: boolean
+  /** Frames written (in order) when a `prompt` command is received, before its
+   *  correlated response — simulates a real agent_start / message_* / agent_end run. */
+  promptEvents?: unknown[]
+  /** Same as `promptEvents` but for `steer` / `follow_up` commands. */
+  steerEvents?: unknown[]
+  followUpEvents?: unknown[]
+  steerAgentInvoked?: boolean
+  followUpAgentInvoked?: boolean
+  /** Path to append every inbound `extension_ui_response` command to, as JSONL,
+   *  so a test can assert what the client answered. */
+  extensionUiResponseMarkerPath?: string
   chunkedCommandOutputLength?: number
   chunkFault?:
     | 'wrong-start-index'

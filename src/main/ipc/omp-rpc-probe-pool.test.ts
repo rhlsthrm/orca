@@ -64,6 +64,9 @@ function createFakeClient(
       }
       return Promise.resolve({ agentInvoked: overrides.agentInvoked ?? false })
     },
+    steer: () => Promise.resolve({ agentInvoked: true }),
+    followUp: () => Promise.resolve({ agentInvoked: true }),
+    respondExtensionUi: () => true,
     on: (listener) => {
       listeners.add(listener)
       return () => listeners.delete(listener)

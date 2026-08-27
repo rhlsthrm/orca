@@ -1,4 +1,8 @@
 import type {
+  OmpRpcAgentEndFrame,
+  OmpRpcAssistantMessageEvent,
+  OmpRpcExtensionUiRequestFrame,
+  OmpRpcMessageUpdateFrame,
   OmpRpcReadyFrame,
   OmpRpcSessionState,
   OmpRpcSlashCommand
@@ -63,4 +67,65 @@ export function parseOmpRpcSessionState(data: unknown): OmpRpcSessionState {
     throw new Error('OMP RPC session state response was malformed')
   }
   return data as OmpRpcSessionState
+}
+
+/** Text/thinking triplet members carry their delta at byte level; every other
+ *  documented member (start/*_start/*_end/image_end/done/error) is a bare or
+ *  loosely-shaped tag. Unknown member types pass through untouched (D3 floor). */
+export function parseOmpRpcAssistantMessageEvent(
+  value: unknown
+): OmpRpcAssistantMessageEvent | null {
+  if (!isOmpRpcObject(value) || typeof value.type !== 'string') {
+    return null
+  }
+  if (
+    (value.type === 'text_delta' || value.type === 'thinking_delta') &&
+    typeof value.delta !== 'string'
+  ) {
+    return null
+  }
+  return value as OmpRpcAssistantMessageEvent
+}
+
+export function parseOmpRpcMessageUpdateFrame(frame: unknown): OmpRpcMessageUpdateFrame | null {
+  if (!isOmpRpcObject(frame) || frame.type !== 'message_update') {
+    return null
+  }
+  const assistantMessageEvent = parseOmpRpcAssistantMessageEvent(frame.assistantMessageEvent)
+  if (!assistantMessageEvent) {
+    return null
+  }
+  return { ...frame, type: 'message_update', assistantMessageEvent } as OmpRpcMessageUpdateFrame
+}
+
+export function parseOmpRpcAgentEndFrame(frame: unknown): OmpRpcAgentEndFrame | null {
+  if (!isOmpRpcObject(frame) || frame.type !== 'agent_end') {
+    return null
+  }
+  if (frame.messages !== undefined && !Array.isArray(frame.messages)) {
+    return null
+  }
+  if (frame.isTerminal !== undefined && typeof frame.isTerminal !== 'boolean') {
+    return null
+  }
+  return frame as OmpRpcAgentEndFrame
+}
+
+export function parseOmpRpcExtensionUiRequestFrame(
+  frame: unknown
+): OmpRpcExtensionUiRequestFrame | null {
+  if (
+    !isOmpRpcObject(frame) ||
+    frame.type !== 'extension_ui_request' ||
+    typeof frame.id !== 'string' ||
+    typeof frame.method !== 'string'
+  ) {
+    return null
+  }
+  if (frame.options !== undefined) {
+    if (!Array.isArray(frame.options) || !frame.options.every((o) => typeof o === 'string')) {
+      return null
+    }
+  }
+  return frame as OmpRpcExtensionUiRequestFrame
 }

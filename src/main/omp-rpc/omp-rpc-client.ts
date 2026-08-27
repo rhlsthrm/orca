@@ -2,6 +2,7 @@ import type {
   OmpRpcCommand,
   OmpRpcClientEvent,
   OmpRpcChunkFrame,
+  OmpRpcExtensionUiResponse,
   OmpRpcReadyFrame,
   OmpRpcSlashCommand,
   OmpRpcSpawnOptions,
@@ -11,13 +12,14 @@ import { OmpRpcChunkReassembler } from './omp-rpc-chunk-reassembler'
 import { OmpRpcCommandError, type OmpRpcPendingResponse } from './omp-rpc-command-correlation'
 import {
   isOmpRpcObject,
-  parseOmpRpcCommands,
   parseOmpRpcCommandsData,
   parseOmpRpcReadyFrame
 } from './omp-rpc-frame-validation'
 import { OmpRpcProcessTransport } from './omp-rpc-process-transport'
 import { OmpRpcProcessExit } from './omp-rpc-process-exit'
 import { OmpRpcSessionCommands } from './omp-rpc-session-commands'
+import { OmpRpcTurnCommands } from './omp-rpc-turn-commands'
+import { resolveOmpRpcServerFrameEvent } from './omp-rpc-frame-dispatch'
 import { OMP_RPC_PROTOCOL_VERSION } from './omp-rpc-transport-limits'
 
 const MALFORMED_LINE_EXCERPT_CHARS = 200
@@ -45,6 +47,10 @@ export class OmpRpcClient implements OmpSessionOwningRpcClient {
   readonly switchSession: OmpSessionOwningRpcClient['switchSession']
   readonly abort: OmpSessionOwningRpcClient['abort']
   readonly whenExited: OmpSessionOwningRpcClient['whenExited']
+  readonly prompt: OmpSessionOwningRpcClient['prompt']
+  readonly steer: OmpSessionOwningRpcClient['steer']
+  readonly followUp: OmpSessionOwningRpcClient['followUp']
+  readonly respondExtensionUi: OmpSessionOwningRpcClient['respondExtensionUi']
 
   constructor(options: OmpRpcSpawnOptions) {
     this.readyPromise = new Promise<ReadyResult>((resolve, reject) => {
@@ -68,6 +74,15 @@ export class OmpRpcClient implements OmpSessionOwningRpcClient {
     this.getState = sessionCommands.getState
     this.switchSession = sessionCommands.switchSession
     this.abort = sessionCommands.abort
+    const turnCommands = new OmpRpcTurnCommands({
+      whenReady: () => this.whenReady(),
+      sendCommand: (command) => this.sendCommand(command),
+      writeRaw: (frame) => this.writeRawFrame(frame)
+    })
+    this.prompt = turnCommands.prompt
+    this.steer = turnCommands.steer
+    this.followUp = turnCommands.followUp
+    this.respondExtensionUi = turnCommands.respondExtensionUi
     this.transport = new OmpRpcProcessTransport(options, {
       onLine: this.handleLine,
       onStreamError: this.handleStreamError,
@@ -89,15 +104,6 @@ export class OmpRpcClient implements OmpSessionOwningRpcClient {
     const commands = parseOmpRpcCommandsData(data)
     this.emit({ kind: 'commands', commands })
     return commands
-  }
-
-  async prompt(message: string): Promise<{ agentInvoked: boolean }> {
-    await this.whenReady()
-    const data = await this.sendCommand({ type: 'prompt', message })
-    return {
-      agentInvoked:
-        isOmpRpcObject(data) && typeof data.agentInvoked === 'boolean' ? data.agentInvoked : true
-    }
   }
 
   on(listener: (event: OmpRpcClientEvent) => void): () => void {
@@ -154,33 +160,15 @@ export class OmpRpcClient implements OmpSessionOwningRpcClient {
       this.handleResponse(frame)
       return
     }
-    if (frame.type === 'available_commands_update') {
-      try {
-        this.emit({ kind: 'commands', commands: parseOmpRpcCommands(frame.commands) })
-      } catch (error) {
-        this.protocolFault(
-          error instanceof Error ? error.message : 'OMP RPC command catalog failed'
-        )
+    const resolution = resolveOmpRpcServerFrameEvent(
+      frame as Record<string, unknown> & { type: string }
+    )
+    if (resolution) {
+      if ('fault' in resolution) {
+        this.protocolFault(resolution.fault)
+      } else {
+        this.emit(resolution.event)
       }
-      return
-    }
-    if (frame.type === 'command_output') {
-      if (typeof frame.text !== 'string') {
-        this.protocolFault('OMP RPC command_output frame was malformed')
-        return
-      }
-      this.emit({ kind: 'command-output', text: frame.text })
-      return
-    }
-    if (frame.type === 'prompt_result') {
-      if (
-        typeof frame.agentInvoked !== 'boolean' ||
-        (frame.id !== undefined && typeof frame.id !== 'string')
-      ) {
-        this.protocolFault('OMP RPC prompt_result frame was malformed')
-        return
-      }
-      this.emit({ kind: 'prompt-result', id: frame.id, agentInvoked: frame.agentInvoked })
       return
     }
     this.emit({ kind: 'unknown-frame', frame: frame as { type: string } & Record<string, unknown> })
@@ -238,6 +226,15 @@ export class OmpRpcClient implements OmpSessionOwningRpcClient {
         reject(new Error('OMP RPC process stdin is unavailable'))
       }
     })
+  }
+
+  /** Raw stdin write bypassing command correlation — used only to answer an
+   *  extension_ui_request by its own `id`, never for a client-initiated command. */
+  private writeRawFrame(frame: OmpRpcExtensionUiResponse): boolean {
+    if (this.isDisposed || this.processExit.hasExited) {
+      return false
+    }
+    return this.transport.write(frame)
   }
 
   private handleResponse(frame: Record<string, unknown>): void {

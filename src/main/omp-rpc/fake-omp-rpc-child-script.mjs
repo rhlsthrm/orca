@@ -129,25 +129,44 @@ input.on('line', (line) => {
     })
     return
   }
-  if (command.type === 'prompt') {
+  if (command.type === 'extension_ui_response') {
+    if (scenario.extensionUiResponseMarkerPath) {
+      appendFileSync(scenario.extensionUiResponseMarkerPath, `${JSON.stringify(command)}\n`)
+    }
+    return
+  }
+  if (command.type === 'prompt' || command.type === 'steer' || command.type === 'follow_up') {
     for (const text of scenario.promptOutput ?? []) {
       writeLine({ type: 'command_output', text })
     }
-    if (typeof scenario.promptResultAgentInvoked === 'boolean') {
+    const events =
+      command.type === 'prompt'
+        ? (scenario.promptEvents ?? [])
+        : command.type === 'steer'
+          ? (scenario.steerEvents ?? [])
+          : (scenario.followUpEvents ?? [])
+    for (const frame of events) {
+      writeLine(frame)
+    }
+    if (command.type === 'prompt' && typeof scenario.promptResultAgentInvoked === 'boolean') {
       writeLine({
         type: 'prompt_result',
         id: command.id,
         agentInvoked: scenario.promptResultAgentInvoked
       })
     }
+    const agentInvoked =
+      command.type === 'prompt'
+        ? scenario.promptAgentInvoked
+        : command.type === 'steer'
+          ? scenario.steerAgentInvoked
+          : scenario.followUpAgentInvoked
     writeLine({
       id: command.id,
       type: 'response',
-      command: 'prompt',
+      command: command.type,
       success: true,
-      ...(typeof scenario.promptAgentInvoked === 'boolean'
-        ? { data: { agentInvoked: scenario.promptAgentInvoked } }
-        : {})
+      ...(typeof agentInvoked === 'boolean' ? { data: { agentInvoked } } : {})
     })
     return
   }

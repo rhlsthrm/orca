@@ -35,7 +35,7 @@ const resolveOmpExecutable = createOmpExecutableResolver({
   }
 })
 
-async function resolveOmpExecutablePath(): Promise<string | null> {
+export async function resolveOmpExecutablePath(): Promise<string | null> {
   return resolveOmpExecutable(TUI_AGENT_CONFIG.omp.launchCmd)
 }
 
@@ -113,7 +113,12 @@ function createDeferredOmpRpcClient(pending: Promise<OmpRpcClientLike>): OmpRpcC
   return {
     whenReady: () => resolved.then((client) => client.whenReady()),
     getCommands: () => resolved.then((client) => client.getCommands()),
-    prompt: (message) => resolved.then((client) => client.prompt(message)),
+    prompt: (message, options) => resolved.then((client) => client.prompt(message, options)),
+    steer: (message, images) => resolved.then((client) => client.steer(message, images)),
+    followUp: (message, images) => resolved.then((client) => client.followUp(message, images)),
+    // Why: the session-less probe never issues extension_ui_request, so a
+    // deferred/not-yet-spawned client has nothing to answer synchronously.
+    respondExtensionUi: () => false,
     on: (listener: OmpRpcClientListener) => {
       let detached = false
       let detach: (() => void) | null = null
