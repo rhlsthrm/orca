@@ -46,12 +46,12 @@ describe('OMP RPC client turn-lifecycle frames', () => {
     await client.prompt('hello')
     expect(events.filter((e) => e.kind === 'message-update')).toHaveLength(2)
     const delta = events.find(
-      (e) => e.kind === 'message-update' && e.frame.assistantMessageEvent.type === 'text_delta'
+      (e) => e.kind === 'message-update' && e.frame.assistantMessageEvent?.type === 'text_delta'
     )
     expect(delta).toBeDefined()
     if (
       delta?.kind === 'message-update' &&
-      delta.frame.assistantMessageEvent.type === 'text_delta'
+      delta.frame.assistantMessageEvent?.type === 'text_delta'
     ) {
       expect(delta.frame.assistantMessageEvent.delta).toBe('Hi')
     }
@@ -66,6 +66,35 @@ describe('OMP RPC client turn-lifecycle frames', () => {
     await client.whenReady()
     await expect(client.prompt('hello')).rejects.toThrow()
     expect(events.some((e) => e.kind === 'protocol-fault')).toBe(true)
+  })
+
+  // F1 (CRITICAL): OMP echoes the user's own turn through message_update
+  // with role:'user' and no assistantMessageEvent at all — this is a valid,
+  // non-fatal frame shape, not a protocol fault.
+  it('does not protocol-fault on a message_update with no assistantMessageEvent (user echo)', async () => {
+    const client = spawnScenario({
+      promptEvents: [
+        { type: 'message_update', message: { role: 'user', content: [] } },
+        { type: 'message_update', assistantMessageEvent: { type: 'text_delta', delta: 'Hi' } }
+      ]
+    })
+    const events: OmpRpcClientEvent[] = []
+    client.on((event) => events.push(event))
+    await client.whenReady()
+    await client.prompt('hello')
+    expect(events.some((e) => e.kind === 'protocol-fault')).toBe(false)
+    const delta = events.find(
+      (e) => e.kind === 'message-update' && e.frame.assistantMessageEvent?.type === 'text_delta'
+    )
+    expect(delta).toBeDefined()
+    const userEcho = events.find(
+      (e) => e.kind === 'message-update' && e.frame.assistantMessageEvent === undefined
+    )
+    expect(userEcho).toBeDefined()
+    // The session must still be alive after the echo — a real, subsequent
+    // command succeeds.
+    const state = await client.getState()
+    expect(state).toBeDefined()
   })
 
   it('emits agent-end honoring isTerminal', async () => {

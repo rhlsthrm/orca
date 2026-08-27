@@ -124,7 +124,7 @@ export type OmpRpcMessageStartFrame = {
 } & Record<string, unknown>
 export type OmpRpcMessageUpdateFrame = {
   type: 'message_update'
-  assistantMessageEvent: OmpRpcAssistantMessageEvent
+  assistantMessageEvent?: OmpRpcAssistantMessageEvent
   message?: unknown
 } & Record<string, unknown>
 export type OmpRpcMessageEndFrame = {

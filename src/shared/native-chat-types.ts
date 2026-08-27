@@ -41,11 +41,14 @@ export type NativeChatTextBlock = {
 
 /** A tool invocation by the agent. `input` is the (already-serialized) tool
  *  argument payload; kept as `unknown` because each tool's shape differs and
- *  the renderer only previews it. */
+ *  the renderer only previews it. `toolCallId`, when the source carries one,
+ *  identifies the same call across an in-progress overlay and its eventual
+ *  transcript entry so a consumer can dedup by identity instead of text. */
 export type NativeChatToolCallBlock = {
   type: 'tool-call'
   name: string
   input: unknown
+  toolCallId?: string
 }
 
 /** The result returned to the agent for a prior tool call. */
@@ -53,6 +56,7 @@ export type NativeChatToolResultBlock = {
   type: 'tool-result'
   output: string
   isError?: boolean
+  toolCallId?: string
 }
 
 /** A reference to an image, by local path or remote URL. Exactly the field

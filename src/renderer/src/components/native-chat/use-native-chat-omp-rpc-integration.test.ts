@@ -88,10 +88,16 @@ describe('useNativeChatOmpRpcIntegration', () => {
     expect(working.result.current.statusOverride).toBe('working')
     expect(working.result.current.isRpcTurnWorking).toBe(true)
 
-    sessionHandle = handle({ isOwned: true, turnState: createInitialOmpRpcTurnState() })
-    const idle = renderHook(() => useNativeChatOmpRpcIntegration(ARGS))
-    expect(idle.result.current.statusOverride).toBeNull()
-    expect(idle.result.current.isRpcTurnWorking).toBe(false)
+    // F2 regression: a turn that already completed must not still read as
+    // "working" just because its content (assistantText/blocks) survives for
+    // the leads-vs-transcript compare — status is the lifecycle fact.
+    sessionHandle = handle({
+      isOwned: true,
+      turnState: { ...createInitialOmpRpcTurnState(), status: 'idle', assistantText: 'hi there' }
+    })
+    const postTurn = renderHook(() => useNativeChatOmpRpcIntegration(ARGS))
+    expect(postTurn.result.current.statusOverride).toBeNull()
+    expect(postTurn.result.current.isRpcTurnWorking).toBe(false)
   })
 
   it('never surfaces an overlay message the transcript already covers (D4)', () => {

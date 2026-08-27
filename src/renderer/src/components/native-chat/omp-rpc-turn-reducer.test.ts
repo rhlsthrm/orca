@@ -93,8 +93,8 @@ describe('ompRpcTurnReducer', () => {
     ])
     expect(state.blocks).toEqual([
       { type: 'text', text: 'Checking...' },
-      { type: 'tool-call', name: 'read', input: { path: 'a' } },
-      { type: 'tool-result', output: 'file body', isError: false },
+      { type: 'tool-call', name: 'read', input: { path: 'a' }, toolCallId: 'c1' },
+      { type: 'tool-result', output: 'file body', isError: false, toolCallId: 'c1' },
       { type: 'text', text: 'Done.' }
     ])
   })
@@ -155,6 +155,97 @@ describe('ompRpcTurnReducer', () => {
       { kind: 'agent-end', frame: { type: 'agent_end' } }
     ])
     expect(state.status).toBe('idle')
+  })
+
+  // F1 (CRITICAL): OMP echoes the user's own turn through message_update with
+  // role:'user' and no assistantMessageEvent at all — this must never fault.
+  it('treats a message_update with no assistantMessageEvent as a valid non-fatal user echo', () => {
+    const state = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'message-update',
+        frame: { type: 'message_update', message: { role: 'user' } }
+      },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'reply' }
+        }
+      }
+    ])
+    expect(state.status).toBe('working')
+    expect(state.assistantText).toBe('reply')
+  })
+
+  // F2 (CRITICAL): isOmpRpcTurnActive must be a lifecycle fact (status alone),
+  // not content-derived — otherwise every completed turn stays "active" forever.
+  it('isOmpRpcTurnActive returns false once a turn completes, even though content survives for the leads compare', () => {
+    const state = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'hi there' }
+        }
+      },
+      { kind: 'agent-end', frame: { type: 'agent_end' } }
+    ])
+    expect(state.status).toBe('idle')
+    expect(state.assistantText).toBe('hi there')
+    expect(isOmpRpcTurnActive(state)).toBe(false)
+  })
+
+  // F3 (HIGH): a dead transport can no longer be "working" — protocol-fault
+  // and exit must clear the working status even though the reducer itself
+  // stays a no-op for anything else (the session hook owns the D1 fallback).
+  it('clears working status on protocol-fault and exit', () => {
+    const faulted = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'partial' }
+        }
+      },
+      { kind: 'protocol-fault', message: 'boom' }
+    ])
+    expect(faulted.status).toBe('idle')
+    expect(isOmpRpcTurnActive(faulted)).toBe(false)
+
+    const exited = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'partial' }
+        }
+      },
+      { kind: 'exit', code: 1, signal: null }
+    ])
+    expect(exited.status).toBe('idle')
+    expect(isOmpRpcTurnActive(exited)).toBe(false)
+  })
+
+  // F11 (MEDIUM): a single tool result must not grow renderer state unbounded.
+  it('caps a single tool-result output at a byte budget', () => {
+    const huge = 'x'.repeat(200_000)
+    const state = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'tool-execution-end',
+        frame: { type: 'tool_execution_end', toolCallId: 'c1', content: huge }
+      }
+    ])
+    const result = state.blocks.find((b) => b.type === 'tool-result')
+    expect(result?.type).toBe('tool-result')
+    if (result?.type === 'tool-result') {
+      expect(result.output.length).toBeLessThan(huge.length)
+      expect(result.output).toContain('truncated')
+    }
   })
 })
 
@@ -244,7 +335,61 @@ describe('selectOmpRpcOverlayMessages', () => {
     ])
     const messages = selectOmpRpcOverlayMessages(state, [])
     expect(messages).toHaveLength(1)
-    expect(messages[0].blocks).toEqual([{ type: 'tool-call', name: 'read', input: {} }])
+    expect(messages[0].blocks).toEqual([
+      { type: 'tool-call', name: 'read', input: {}, toolCallId: 'c1' }
+    ])
+  })
+
+  // F8 (MEDIUM): a tool-first turn (empty assistantText) whose tool entry the
+  // transcript tailer already surfaced must render it exactly once, not
+  // duplicated between the overlay and the transcript.
+  it('suppresses an overlay tool block once the transcript already carries its toolCallId', () => {
+    const state = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'tool-execution-start',
+        frame: { type: 'tool_execution_start', toolCallId: 'c1', toolName: 'read', input: {} }
+      },
+      {
+        kind: 'tool-execution-end',
+        frame: { type: 'tool_execution_end', toolCallId: 'c1', content: 'done' }
+      }
+    ])
+    const transcript: NativeChatMessage[] = [
+      {
+        id: 't-tool',
+        role: 'tool',
+        blocks: [{ type: 'tool-result', output: 'done', toolCallId: 'c1' }],
+        timestamp: null,
+        source: 'transcript'
+      }
+    ]
+    expect(selectOmpRpcOverlayMessages(state, transcript)).toEqual([])
+  })
+
+  // F8: a text-length tie against the transcript must hide only the text
+  // block, never the in-flight tool blocks the transcript hasn't caught up to.
+  it('keeps in-flight tool blocks visible on a text-length tie with the transcript', () => {
+    const state = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'Hello' }
+        }
+      },
+      {
+        kind: 'tool-execution-start',
+        frame: { type: 'tool_execution_start', toolCallId: 'c2', toolName: 'read', input: {} }
+      }
+    ])
+    // Tie: transcript's last assistant text is exactly as long as the overlay's.
+    const messages = selectOmpRpcOverlayMessages(state, [transcriptAssistant('Hello')])
+    expect(messages).toHaveLength(1)
+    expect(messages[0].blocks).toEqual([
+      { type: 'tool-call', name: 'read', input: {}, toolCallId: 'c2' }
+    ])
   })
 })
 
@@ -270,7 +415,7 @@ describe('extension-ui request queueing', () => {
       createInitialOmpRpcTurnState(),
       frame({
         kind: 'extension-ui-request',
-        frame: { type: 'extension_ui_request', id: 'ask-1', method: 'select' }
+        frame: { type: 'extension_ui_request', id: 'ask-1', method: 'select', options: ['Yes'] }
       })
     )
     state = ompRpcTurnReducer(
@@ -289,7 +434,7 @@ describe('extension-ui request queueing', () => {
       createInitialOmpRpcTurnState(),
       frame({
         kind: 'extension-ui-request',
-        frame: { type: 'extension_ui_request', id: 'ask-1', method: 'select' }
+        frame: { type: 'extension_ui_request', id: 'ask-1', method: 'select', options: ['Yes'] }
       })
     )
     state = ompRpcTurnReducer(
@@ -309,7 +454,7 @@ describe('extension-ui request queueing', () => {
       createInitialOmpRpcTurnState(),
       frame({
         kind: 'extension-ui-request',
-        frame: { type: 'extension_ui_request', id: 'ask-1', method: 'select' }
+        frame: { type: 'extension_ui_request', id: 'ask-1', method: 'select', options: ['Yes'] }
       })
     )
     state = ompRpcTurnReducer(
@@ -337,5 +482,28 @@ describe('extension-ui request queueing', () => {
     )
     expect(state.pendingExtensionUiRequest).toBeNull()
     expect(state.queuedExtensionUiRequests).toEqual([])
+  })
+
+  // F6 (HIGH): a select with no non-empty options renders zero buttons — the
+  // reducer must not promote it to pendingExtensionUiRequest (it would wedge
+  // the pane, since the composer is unmounted while a request is pending).
+  it('never promotes a select request with absent or empty options', () => {
+    const absentOptions = ompRpcTurnReducer(
+      createInitialOmpRpcTurnState(),
+      frame({
+        kind: 'extension-ui-request',
+        frame: { type: 'extension_ui_request', id: 'ask-empty-1', method: 'select' }
+      })
+    )
+    expect(absentOptions.pendingExtensionUiRequest).toBeNull()
+
+    const emptyOptions = ompRpcTurnReducer(
+      createInitialOmpRpcTurnState(),
+      frame({
+        kind: 'extension-ui-request',
+        frame: { type: 'extension_ui_request', id: 'ask-empty-2', method: 'select', options: [] }
+      })
+    )
+    expect(emptyOptions.pendingExtensionUiRequest).toBeNull()
   })
 })

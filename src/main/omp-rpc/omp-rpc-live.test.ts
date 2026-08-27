@@ -3,7 +3,7 @@
 // stays green while a developer can prove the client against the real agent.
 
 import { describe, expect, it } from 'vitest'
-import { access, constants as fsConstants } from 'node:fs/promises'
+import { access, constants as fsConstants, mkdtemp } from 'node:fs/promises'
 import os from 'node:os'
 import path from 'node:path'
 import { spawnOmpRpcClient } from './omp-rpc-client'
@@ -63,5 +63,60 @@ describe.skipIf(!LIVE_ENABLED)('omp rpc client against a live OMP', () => {
     } finally {
       client.dispose()
     }
+  }, 60_000)
+})
+
+describe.skipIf(!LIVE_ENABLED)('omp rpc switch_session sessionPath vs bare id (F12)', () => {
+  it('requires the absolute session file path — a bare session id silently fails to switch', async () => {
+    const executablePath = await findOmp()
+    if (!executablePath) {
+      throw new Error('ORCA_OMP_RPC_LIVE=1 but no omp binary found')
+    }
+    const cwd = await mkdtemp(path.join(os.tmpdir(), 'omp-rpc-f12-'))
+    // Create a real session: session-owning mode creates/loads a session for
+    // `cwd` on spawn, before any prompt — get_state is a control-plane call,
+    // no model invocation needed.
+    const origin = spawnOmpRpcClient({ executablePath, cwd, sessionMode: 'session-owning' })
+    let sessionId: string
+    let sessionFile: string
+    try {
+      await origin.whenReady()
+      const state = await origin.getState()
+      if (!state.sessionFile || !state.sessionId) {
+        throw new Error('origin session did not report a complete session identity')
+      }
+      sessionFile = state.sessionFile
+      sessionId = state.sessionId
+    } finally {
+      origin.dispose()
+    }
+
+    const probe = async (
+      sessionPath: string
+    ): Promise<{ ok: true } | { ok: false; error: string }> => {
+      const client = spawnOmpRpcClient({ executablePath, cwd, sessionMode: 'session-owning' })
+      try {
+        await client.whenReady()
+        await client.switchSession(sessionPath)
+        const state = await client.getState()
+        return state.sessionFile === sessionFile
+          ? { ok: true }
+          : { ok: false, error: 'sessionFile mismatch after switch' }
+      } catch (error) {
+        return { ok: false, error: error instanceof Error ? error.message : String(error) }
+      } finally {
+        client.dispose()
+      }
+    }
+
+    const bareIdResult = await probe(sessionId)
+    const absolutePathResult = await probe(sessionFile)
+
+    // Why: F12 live verdict against omp 18.0.6, recorded in
+    // docs/omp-rpc-chat-adapter-plan.md — `switch_session` does NOT throw on
+    // a bare id, but silently fails to switch (get_state's sessionFile never
+    // matches); only the absolute session file path actually switches.
+    expect(bareIdResult).toEqual({ ok: false, error: 'sessionFile mismatch after switch' })
+    expect(absolutePathResult).toEqual({ ok: true })
   }, 60_000)
 })

@@ -87,9 +87,20 @@ export function parseOmpRpcAssistantMessageEvent(
   return value as OmpRpcAssistantMessageEvent
 }
 
+/** An absent `assistantMessageEvent` is a VALID, non-fatal shape — verified
+ *  live: OMP echoes the user's own turn through `message_update` with
+ *  `message.role:'user'` and no `assistantMessageEvent` at all. Fault only
+ *  when the field is present but fails its own shape check. */
 export function parseOmpRpcMessageUpdateFrame(frame: unknown): OmpRpcMessageUpdateFrame | null {
   if (!isOmpRpcObject(frame) || frame.type !== 'message_update') {
     return null
+  }
+  if (frame.assistantMessageEvent === undefined) {
+    return {
+      ...frame,
+      type: 'message_update',
+      assistantMessageEvent: undefined
+    } as OmpRpcMessageUpdateFrame
   }
   const assistantMessageEvent = parseOmpRpcAssistantMessageEvent(frame.assistantMessageEvent)
   if (!assistantMessageEvent) {

@@ -153,7 +153,10 @@ describe('useOmpRpcChatSession', () => {
     expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' })
   })
 
-  it('releases on view-away (isVisible flips false) without unmounting', async () => {
+  // F9: a visibility toggle (Chat -> Terminal and back) must never abort or
+  // release an already-acquired session — only unmount, pane close, or a
+  // genuine identity rebind may release.
+  it('holds the acquired session across a visibility toggle (view-away then back)', async () => {
     acquire.mockResolvedValue({ ok: true })
     const { result, rerender } = renderHook(
       (props: UseOmpRpcChatSessionArgs) => useOmpRpcChatSession(props),
@@ -162,9 +165,11 @@ describe('useOmpRpcChatSession', () => {
     await waitFor(() => expect(result.current.status).toBe('acquired'))
 
     rerender({ ...BASE_ARGS, isVisible: false })
+    rerender({ ...BASE_ARGS, isVisible: true })
 
-    await waitFor(() => expect(result.current.status).toBe('idle'))
-    expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' })
+    expect(result.current.status).toBe('acquired')
+    expect(release).not.toHaveBeenCalled()
+    expect(acquire).toHaveBeenCalledTimes(1)
   })
 
   it('resets turn state and re-acquires on an identity rebind (ptyId change)', async () => {
@@ -260,5 +265,69 @@ describe('useOmpRpcChatSession', () => {
       response: { type: 'extension_ui_response', id: 'req-1', confirmed: true }
     })
     expect(result.current.turnState.pendingExtensionUiRequest).toBeNull()
+  })
+
+  // F3 (HIGH): a protocol-fault or exit frame mid-turn must flip isOwned
+  // false and release the dead session so the caller's send path falls back
+  // to PTY, instead of staying stuck claiming a session that will never
+  // stream another frame.
+  it.each(['protocol-fault', 'exit'] as const)(
+    'flips to faulted and releases on a "%s" frame, so isOwned goes false',
+    async (kind) => {
+      acquire.mockResolvedValue({ ok: true })
+      const { result } = renderHook(() => useOmpRpcChatSession(BASE_ARGS))
+      await waitFor(() => expect(result.current.status).toBe('acquired'))
+
+      act(() => {
+        lastSubscribedListener()({ kind: 'agent-start', frame: { type: 'agent_start' } })
+      })
+      act(() => {
+        lastSubscribedListener()({
+          kind: 'message-update',
+          frame: {
+            type: 'message_update',
+            assistantMessageEvent: { type: 'text_delta', delta: 'partial' }
+          }
+        })
+      })
+      act(() => {
+        lastSubscribedListener()(
+          kind === 'protocol-fault'
+            ? { kind: 'protocol-fault', message: 'boom' }
+            : { kind: 'exit', code: 1, signal: null }
+        )
+      })
+
+      expect(result.current.status).toBe('faulted')
+      expect(result.current.isOwned).toBe(false)
+      await waitFor(() => expect(release).toHaveBeenCalledWith({ paneKey: 'tab-1:leaf-1' }))
+
+      const sendResult = await result.current.send({ message: 'hi', behavior: 'idle' })
+      expect(sendResult.ok).toBe(false)
+      expect(send).not.toHaveBeenCalled()
+    }
+  )
+
+  // F5 (HIGH): a conflict is very often the release-in-flight or
+  // StrictMode-double-mount race — retry once with bounded backoff before
+  // surfacing failure.
+  it('retries once on an acquire "conflict" and succeeds on the retry', async () => {
+    acquire.mockResolvedValueOnce({ ok: false, reason: 'conflict' })
+    acquire.mockResolvedValueOnce({ ok: true })
+    const { result } = renderHook(() => useOmpRpcChatSession(BASE_ARGS))
+
+    await waitFor(() => expect(result.current.status).toBe('acquired'))
+    expect(acquire).toHaveBeenCalledTimes(2)
+  })
+
+  // F7 (MEDIUM): a rejected acquire IPC call must degrade to a fail-closed
+  // status, never an unhandled rejection that leaves `status` pinned at
+  // 'pending' forever.
+  it('degrades to a fail-closed status when acquire rejects', async () => {
+    acquire.mockRejectedValue(new Error('ipc channel not registered'))
+    const { result } = renderHook(() => useOmpRpcChatSession(BASE_ARGS))
+
+    await waitFor(() => expect(result.current.status).toBe('spawn-failed'))
+    expect(result.current.isOwned).toBe(false)
   })
 })

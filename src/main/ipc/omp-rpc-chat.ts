@@ -25,6 +25,7 @@ import { ptyOwnership } from './pty/provider/ownership-state'
 import { tryGetProviderForPty } from './pty/provider/registry'
 import { parseAppSshPtyId } from '../providers/ssh-pty-id'
 import { resolveOmpExecutablePath } from './omp-rpc'
+import { resolveSessionFilePath } from '../native-chat/session-file-resolver'
 
 let registry: OmpRpcChatSessionRegistry | null = null
 
@@ -122,32 +123,50 @@ export function registerOmpRpcChatHandlers(): void {
   ipcMain.handle(
     'ompRpcChat:acquire',
     async (_event, args: OmpRpcChatAcquireArgs): Promise<OmpRpcChatAcquireResult> => {
-      const paneKey = args?.paneKey?.trim()
-      const ptyId = args?.ptyId?.trim()
-      const cwd = args?.cwd?.trim()
-      const sessionFile = args?.sessionFile?.trim()
-      if (!paneKey || !ptyId || !cwd || !sessionFile) {
+      // Why (F7): every await below (executable resolution, the registry's
+      // spawn/handoff) can reject; the IPC boundary must never propagate a
+      // throw to the renderer (D1) — degrade to the same fail-closed result
+      // the registry itself already returns for its own known failures.
+      try {
+        const paneKey = args?.paneKey?.trim()
+        const ptyId = args?.ptyId?.trim()
+        const cwd = args?.cwd?.trim()
+        const sessionFile = args?.sessionFile?.trim()
+        if (!paneKey || !ptyId || !cwd || !sessionFile) {
+          return { ok: false, reason: 'spawn-failed' }
+        }
+        const executablePath = await resolveOmpExecutablePath()
+        if (!executablePath) {
+          return { ok: false, reason: 'executable-not-found' }
+        }
+        // Why (F12, live-verified against omp 18.0.6): `switch_session`'s
+        // wire field is a filesystem path, not the bare session id this
+        // milestone's callers pass — a bare id neither throws nor switches,
+        // so acquisition must resolve the real transcript file first or it
+        // silently never engages RPC for any pane.
+        const sessionFilePath = await resolveSessionFilePath('omp', sessionFile)
+        if (!sessionFilePath) {
+          return { ok: false, reason: 'spawn-failed' }
+        }
+        const result = await getRegistry().acquire({
+          paneKey,
+          ptyId,
+          cwd,
+          executablePath,
+          sessionFile,
+          sessionFilePath,
+          isPtyAlive: isLocalPtyAlive
+        })
+        if (result.status === 'acquired') {
+          return { ok: true }
+        }
+        if (result.status === 'live' || result.status === 'unverifiable') {
+          return { ok: false, reason: result.status }
+        }
+        return { ok: false, reason: result.status === 'conflict' ? 'conflict' : 'spawn-failed' }
+      } catch {
         return { ok: false, reason: 'spawn-failed' }
       }
-      const executablePath = await resolveOmpExecutablePath()
-      if (!executablePath) {
-        return { ok: false, reason: 'executable-not-found' }
-      }
-      const result = await getRegistry().acquire({
-        paneKey,
-        ptyId,
-        cwd,
-        executablePath,
-        sessionFile,
-        isPtyAlive: isLocalPtyAlive
-      })
-      if (result.status === 'acquired') {
-        return { ok: true }
-      }
-      if (result.status === 'live' || result.status === 'unverifiable') {
-        return { ok: false, reason: result.status }
-      }
-      return { ok: false, reason: result.status === 'conflict' ? 'conflict' : 'spawn-failed' }
     }
   )
 

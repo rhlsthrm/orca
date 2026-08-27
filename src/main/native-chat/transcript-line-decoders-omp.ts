@@ -56,6 +56,7 @@ export function decodeOmpTranscriptLine(
   const role = extractString(message.role)
 
   if (role === 'toolResult') {
+    const toolCallId = extractString(message.toolCallId)
     return {
       id,
       role: 'tool',
@@ -63,7 +64,8 @@ export function decodeOmpTranscriptLine(
         {
           type: 'tool-result',
           output: toolResultOutput(message.content),
-          ...(message.isError === true ? { isError: true } : {})
+          ...(message.isError === true ? { isError: true } : {}),
+          ...(toolCallId ? { toolCallId } : {})
         }
       ],
       timestamp,
@@ -207,7 +209,13 @@ function ompContentBlock(record: Record<string, unknown> | null): NativeChatBloc
     }
     case 'toolCall': {
       const name = extractString(record.name) ?? 'tool'
-      return { type: 'tool-call', name, input: record.arguments }
+      const toolCallId = extractString(record.id)
+      return {
+        type: 'tool-call',
+        name,
+        input: record.arguments,
+        ...(toolCallId ? { toolCallId } : {})
+      }
     }
     case 'image':
       // Why: omp stores images as content-addressed blob handles

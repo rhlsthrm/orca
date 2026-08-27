@@ -54,6 +54,19 @@ export function NativeChatExtensionUiCard({
               {option}
             </Button>
           ))}
+          {/* Why (F6): the pane's only input while a request is pending must
+           *  always offer a decline path — an options list, even a
+           *  legitimately empty one, is never the only way out. */}
+          <Button
+            type="button"
+            variant="ghost"
+            size="sm"
+            onClick={() =>
+              onAnswer({ type: 'extension_ui_response', id: request.id, cancelled: true })
+            }
+          >
+            {translate('components.native-chat.extensionUi.cancel', 'Cancel')}
+          </Button>
         </div>
       </ExtensionUiCardShell>
     )
@@ -116,6 +129,19 @@ export function NativeChatExtensionUiCard({
         />
         <Button type="button" size="sm" disabled={!trimmed} onClick={submit}>
           {translate('components.native-chat.extensionUi.submit', 'Submit')}
+        </Button>
+        {/* Why (F6): a request without a `timeout` would otherwise wedge the
+         *  pane indefinitely — the composer is unmounted while a request is
+         *  pending, so this card must always offer a way out. */}
+        <Button
+          type="button"
+          variant="ghost"
+          size="sm"
+          onClick={() =>
+            onAnswer({ type: 'extension_ui_response', id: request.id, cancelled: true })
+          }
+        >
+          {translate('components.native-chat.extensionUi.cancel', 'Cancel')}
         </Button>
       </div>
     </ExtensionUiCardShell>

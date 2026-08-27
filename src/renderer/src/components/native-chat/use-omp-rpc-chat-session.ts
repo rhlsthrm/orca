@@ -8,6 +8,7 @@ import { useCallback, useEffect, useReducer, useRef, useState } from 'react'
 import type { AgentType } from '../../../../shared/agent-status-types'
 import type {
   OmpRpcChatAcquireFailureReason,
+  OmpRpcChatAcquireResult,
   OmpRpcChatSendBehavior,
   OmpRpcChatSendResult
 } from '../../../../shared/omp-rpc-chat-ipc-contract'
@@ -27,6 +28,10 @@ export type OmpRpcChatSessionStatus =
   | 'idle'
   | 'pending'
   | 'acquired'
+  // Why (F3): the RPC child exited or protocol-faulted mid-turn — a terminal
+  // failure distinct from 'acquired' so `isOwned` flips false and sends fall
+  // back to PTY (D1), instead of staying stuck claiming a dead session.
+  | 'faulted'
   | OmpRpcChatAcquireFailureReason
 
 export type UseOmpRpcChatSessionArgs = {
@@ -97,16 +102,34 @@ function nextOmpRpcChatSubscriptionId(): string {
 /** Lives outside the effect: react-doctor's effect-needs-cleanup
  *  false-positives on `subscribe` calls inside an effect body (see the
  *  identical note in useDashboardPopoutBridge.ts); the effect's own returned
- *  cleanup below still owns and calls the unsubscribe this returns. */
+ *  cleanup below still owns and calls the unsubscribe this returns.
+ *  `onFatalFrame` fires for `exit`/`protocol-fault` (F3): the reducer itself
+ *  stays a pure state machine, but the hook is the D1 fallback boundary — a
+ *  dead transport must flip `isOwned` false so sends route back to PTY. */
 function subscribeOmpRpcChatFrames(
   api: NonNullable<typeof window.api.ompRpcChat>,
   paneKey: string,
-  dispatch: (action: OmpRpcTurnAction) => void
+  dispatch: (action: OmpRpcTurnAction) => void,
+  onFatalFrame: () => void
 ): () => void {
   const subscriptionId = nextOmpRpcChatSubscriptionId()
   return api.subscribe({ paneKey, subscriptionId }, (event) => {
     dispatch({ type: 'frame', event })
+    if (event.kind === 'exit' || event.kind === 'protocol-fault') {
+      onFatalFrame()
+    }
   })
+}
+
+/** Bounded backoff before retrying a single `agent_session_conflict` (F5):
+ *  covers the release-in-flight and StrictMode-double-acquire windows without
+ *  looping forever on a genuine, persistent conflict. */
+const CONFLICT_RETRY_DELAY_MS = 250
+
+function delay(ms: number): Promise<void> {
+  const { promise, resolve } = Promise.withResolvers<void>()
+  setTimeout(resolve, ms)
+  return promise
 }
 
 export function useOmpRpcChatSession(args: UseOmpRpcChatSessionArgs): OmpRpcChatSessionHandle {
@@ -120,21 +143,45 @@ export function useOmpRpcChatSession(args: UseOmpRpcChatSessionArgs): OmpRpcChat
   // Read inside stable callbacks below without adding `status` to their deps.
   const statusRef = useRef(status)
   statusRef.current = status
-
-  const eligible = isOmpRpcChatSessionEligible({
-    agent,
-    isVisible,
-    runtimeEnvironmentId,
-    ptyId,
-    cwd,
-    sessionFile
+  // Why (F9): visibility gates the FIRST acquisition (don't spawn an RPC
+  // child for a pane whose Chat view has never been opened) but must never
+  // trigger release on its own afterward — toggling Chat -> Terminal and
+  // back must not abort a live turn. The latch remembers "has this identity
+  // ever been visible" and only resets on a genuine identity rebind.
+  const identityKey = `${paneKey}:${ptyId ?? ''}:${cwd ?? ''}:${sessionFile ?? ''}`
+  const visibilityLatchRef = useRef<{ key: string; wasVisible: boolean }>({
+    key: identityKey,
+    wasVisible: false
   })
+  if (visibilityLatchRef.current.key !== identityKey) {
+    visibilityLatchRef.current = { key: identityKey, wasVisible: false }
+  }
+  if (isVisible) {
+    visibilityLatchRef.current.wasVisible = true
+  }
+  // Why (F5): every effect run gets a new generation; a callback whose
+  // generation the ref has since moved past was superseded by a later
+  // effect run (StrictMode's double mount, or a rapid rebind) and must do
+  // nothing — the newer run alone owns the acquire/release lifecycle for
+  // this identity, so both callbacks racing to act on the same promise can
+  // never both mutate state or both release.
+  const generationRef = useRef(0)
+
+  const identityEligible =
+    isOmpRpcCatalogAgent(agent) &&
+    runtimeEnvironmentId === null &&
+    ptyId !== null &&
+    cwd !== null &&
+    sessionFile !== null
+  const eligible = identityEligible && visibilityLatchRef.current.wasVisible
 
   useEffect(() => {
     // Every identity rebind (including going eligible -> ineligible) starts
     // the next turn's overlay from empty, so a previous pane's content can
     // never bleed into this one.
     dispatch({ type: 'reset' })
+    generationRef.current += 1
+    const generation = generationRef.current
     if (!eligible) {
       setStatus('idle')
       return
@@ -148,37 +195,74 @@ export function useOmpRpcChatSession(args: UseOmpRpcChatSessionArgs): OmpRpcChat
     let unsubscribe: (() => void) | null = null
     let acquiredThisEffect = false
     setStatus('pending')
-    void api
-      .acquire({
-        paneKey,
-        ptyId: ptyId as string,
-        cwd: cwd as string,
-        sessionFile: sessionFile as string
-      })
-      .then((result) => {
-        if (cancelled) {
-          // The pane unmounted, went invisible, or rebound identity while the
-          // acquisition was in flight — never leave a just-acquired child
-          // holding the session hostage.
-          if (result.ok) {
-            void api.release({ paneKey })
-          }
-          return
+
+    const acquireOnce = (): Promise<OmpRpcChatAcquireResult> =>
+      api
+        .acquire({
+          paneKey,
+          ptyId: ptyId as string,
+          cwd: cwd as string,
+          sessionFile: sessionFile as string
+        })
+        // Why (F7): a rejection crossing the IPC boundary (e.g. the main
+        // handler's executable resolution throwing) must degrade to a
+        // fail-closed result, not an unhandled rejection that leaves
+        // `status` pinned at 'pending' forever.
+        .catch((): OmpRpcChatAcquireResult => ({ ok: false, reason: 'spawn-failed' }))
+
+    const onFatalFrame = (): void => {
+      if (generation !== generationRef.current) {
+        return
+      }
+      setStatus('faulted')
+      unsubscribe?.()
+      unsubscribe = null
+      acquiredThisEffect = false
+      void api.release({ paneKey }).catch(() => {})
+    }
+
+    void (async () => {
+      let result = await acquireOnce()
+      if (!result.ok && result.reason === 'conflict' && !cancelled) {
+        // Why (F5): a conflict is very often a transient race — an in-flight
+        // release still holding the claim, or StrictMode's double mount —
+        // not a real double-owner. Retry once with bounded backoff before
+        // surfacing failure.
+        await delay(CONFLICT_RETRY_DELAY_MS)
+        if (generation === generationRef.current) {
+          result = await acquireOnce()
         }
-        if (!result.ok) {
-          setStatus(result.reason)
-          return
+      }
+      if (generation !== generationRef.current) {
+        // Superseded by a later effect run, which owns this identity's
+        // lifecycle now — never release out from under it.
+        return
+      }
+      if (cancelled) {
+        // The pane unmounted, went invisible-before-ever-visible, or
+        // rebound identity while the acquisition was in flight — never
+        // leave a just-acquired child holding the session hostage.
+        if (result.ok) {
+          void api.release({ paneKey }).catch(() => {})
         }
-        acquiredThisEffect = true
-        setStatus('acquired')
-        unsubscribe = subscribeOmpRpcChatFrames(api, paneKey, dispatch)
-      })
+        return
+      }
+      if (!result.ok) {
+        setStatus(result.reason)
+        return
+      }
+      acquiredThisEffect = true
+      setStatus('acquired')
+      unsubscribe = subscribeOmpRpcChatFrames(api, paneKey, dispatch, onFatalFrame)
+    })()
+
     return () => {
       cancelled = true
       unsubscribe?.()
       unsubscribe = null
       if (acquiredThisEffect) {
-        void api.release({ paneKey })
+        acquiredThisEffect = false
+        void api.release({ paneKey }).catch(() => {})
       }
     }
   }, [eligible, paneKey, ptyId, cwd, sessionFile])
@@ -207,7 +291,9 @@ export function useOmpRpcChatSession(args: UseOmpRpcChatSessionArgs): OmpRpcChat
       // Dispatch unconditionally: the reducer's dismiss is a local UI concern
       // independent of whether the IPC round trip below can still land.
       dispatch({ type: 'extension-ui-answered', requestId: response.id })
-      window.api?.ompRpcChat?.respondExtensionUi({ paneKey, response })
+      // Why (F7): fire-and-forget, but a rejected IPC round trip must not
+      // become an unhandled promise rejection.
+      void window.api?.ompRpcChat?.respondExtensionUi({ paneKey, response })?.catch(() => {})
     },
     [paneKey]
   )

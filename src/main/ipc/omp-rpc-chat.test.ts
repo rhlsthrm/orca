@@ -2,31 +2,40 @@ import { describe, expect, it, vi, beforeEach } from 'vitest'
 import type { OmpRpcChatEventPayload } from '../../shared/omp-rpc-chat-ipc-contract'
 import type { OmpRpcClientEvent } from '../../shared/omp-rpc-protocol'
 
-const { handle, on, appOnce, registryInstance, RegistryCtor, resolveOmpExecutablePath } =
-  vi.hoisted(() => {
-    const registryInstance = {
-      acquire: vi.fn(),
-      release: vi.fn(),
-      get: vi.fn(),
-      disposeAll: vi.fn()
-    }
-    return {
-      handle: vi.fn(),
-      on: vi.fn(),
-      appOnce: vi.fn(),
-      registryInstance,
-      RegistryCtor: vi.fn(function OmpRpcChatSessionRegistry() {
-        return registryInstance
-      }),
-      resolveOmpExecutablePath: vi.fn()
-    }
-  })
+const {
+  handle,
+  on,
+  appOnce,
+  registryInstance,
+  RegistryCtor,
+  resolveOmpExecutablePath,
+  resolveSessionFilePath
+} = vi.hoisted(() => {
+  const registryInstance = {
+    acquire: vi.fn(),
+    release: vi.fn(),
+    get: vi.fn(),
+    disposeAll: vi.fn()
+  }
+  return {
+    handle: vi.fn(),
+    on: vi.fn(),
+    appOnce: vi.fn(),
+    registryInstance,
+    RegistryCtor: vi.fn(function OmpRpcChatSessionRegistry() {
+      return registryInstance
+    }),
+    resolveOmpExecutablePath: vi.fn(),
+    resolveSessionFilePath: vi.fn()
+  }
+})
 
 vi.mock('electron', () => ({ ipcMain: { handle, on }, app: { once: appOnce } }))
 vi.mock('../omp-rpc/omp-rpc-chat-session-registry', () => ({
   OmpRpcChatSessionRegistry: RegistryCtor
 }))
 vi.mock('./omp-rpc', () => ({ resolveOmpExecutablePath }))
+vi.mock('../native-chat/session-file-resolver', () => ({ resolveSessionFilePath }))
 
 import { clearOmpRpcChatHandlersForTests, registerOmpRpcChatHandlers } from './omp-rpc-chat'
 
@@ -51,6 +60,7 @@ describe('OMP RPC chat IPC handlers', () => {
     clearOmpRpcChatHandlersForTests()
     vi.clearAllMocks()
     resolveOmpExecutablePath.mockResolvedValue('/usr/local/bin/omp')
+    resolveSessionFilePath.mockResolvedValue('/sessions/a.jsonl')
   })
 
   it('registers acquire/release/send/abort/respond and the subscribe push channels', () => {
@@ -99,16 +109,35 @@ describe('OMP RPC chat IPC handlers', () => {
         paneKey: 'tab:leaf',
         ptyId: 'pty-1',
         cwd: '/work',
-        sessionFile: '/sessions/a.jsonl'
+        sessionFile: 'session-id-1'
       })
     ).resolves.toEqual({ ok: true })
+    expect(resolveSessionFilePath).toHaveBeenCalledWith('omp', 'session-id-1')
     expect(registryInstance.acquire).toHaveBeenCalledWith(
       expect.objectContaining({
         paneKey: 'tab:leaf',
         ptyId: 'pty-1',
-        executablePath: '/usr/local/bin/omp'
+        executablePath: '/usr/local/bin/omp',
+        sessionFile: 'session-id-1',
+        sessionFilePath: '/sessions/a.jsonl'
       })
     )
+  })
+
+  // F12: switch_session requires the resolved absolute path, not the bare id
+  // — acquisition must fail closed rather than pass the id through unresolved.
+  it('fails closed when the bare session id cannot be resolved to a file path', async () => {
+    resolveSessionFilePath.mockResolvedValue(null)
+    registerOmpRpcChatHandlers()
+    await expect(
+      invoke('ompRpcChat:acquire', {
+        paneKey: 'tab:leaf',
+        ptyId: 'pty-1',
+        cwd: '/work',
+        sessionFile: 'session-id-1'
+      })
+    ).resolves.toEqual({ ok: false, reason: 'spawn-failed' })
+    expect(registryInstance.acquire).not.toHaveBeenCalled()
   })
 
   it('maps a live-pty refusal to ok:false reason "live"', async () => {

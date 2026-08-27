@@ -131,4 +131,47 @@ describe('NativeChatExtensionUiCard', () => {
     )
     expect(screen.getByText(/resolves automatically/i)).toBeInTheDocument()
   })
+
+  // F6 (HIGH): the pane's only input while a request is pending must always
+  // offer a decline path — a select's options list (even a legitimately
+  // empty one) must never be the only way out.
+  it("answers cancelled:true from the select branch's Cancel button", () => {
+    const onAnswer = vi.fn()
+    render(
+      <NativeChatExtensionUiCard
+        request={{
+          type: 'extension_ui_request',
+          id: 'req-6',
+          method: 'select',
+          options: ['Approve', 'Deny']
+        }}
+        onAnswer={onAnswer}
+      />
+    )
+    fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+    expect(onAnswer).toHaveBeenCalledWith({
+      type: 'extension_ui_response',
+      id: 'req-6',
+      cancelled: true
+    })
+  })
+
+  it.each(['input', 'editor'] as const)(
+    'answers cancelled:true from the "%s" branch\'s Cancel button without requiring text',
+    (method) => {
+      const onAnswer = vi.fn()
+      render(
+        <NativeChatExtensionUiCard
+          request={{ type: 'extension_ui_request', id: 'req-7', method }}
+          onAnswer={onAnswer}
+        />
+      )
+      fireEvent.click(screen.getByRole('button', { name: 'Cancel' }))
+      expect(onAnswer).toHaveBeenCalledWith({
+        type: 'extension_ui_response',
+        id: 'req-7',
+        cancelled: true
+      })
+    }
+  )
 })

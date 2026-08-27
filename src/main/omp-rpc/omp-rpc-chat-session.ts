@@ -61,9 +61,15 @@ export class OmpRpcChatSession {
 
   /** Fire-and-forget: false only means the transport can't accept writes right
    *  now (disposed/exited) — OMP resolves a pending dialog to a default on its
-   *  own timeout, so a dropped reply is safe by design, not a hang. */
+   *  own timeout, so a dropped reply is safe by design, not a hang. Wrapped
+   *  in try/catch to match `send`/`abort`'s fail-closed contract (F7) rather
+   *  than relying on every layer below independently never throwing. */
   respondExtensionUi(response: OmpRpcExtensionUiResponse): boolean {
-    return this.owned.client.respondExtensionUi(response)
+    try {
+      return this.owned.client.respondExtensionUi(response)
+    } catch {
+      return false
+    }
   }
 
   dispose(): void {
