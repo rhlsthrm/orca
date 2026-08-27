@@ -11,15 +11,21 @@ import type { AgentType } from './agent-status-types'
 export type { AgentType }
 
 /** Where a message came from. Used for dedup precedence: a transcript message
- *  supersedes a hook message, which supersedes a scrape message. */
-export const NATIVE_CHAT_SOURCES = ['transcript', 'hook', 'scrape'] as const
+ *  supersedes an RPC overlay message, which supersedes a hook message, which
+ *  supersedes a scrape message. RPC overlay messages are never id-keyed
+ *  against the transcript in practice (RPC's in-progress `message` frames
+ *  carry no id corresponding to a transcript entry id — verified live against
+ *  omp 18.0.6) — the priority still orders them correctly if a future id ever
+ *  does correspond, and the rank matters for the overlay-vs-hook-preview case. */
+export const NATIVE_CHAT_SOURCES = ['transcript', 'rpc', 'hook', 'scrape'] as const
 export type NativeChatSource = (typeof NATIVE_CHAT_SOURCES)[number]
 
 /** Priority rank for a source — higher wins when two sources describe the same
  *  turn. Kept as data so the assembler's precedence is a single lookup, not a
  *  chain of conditionals. */
 export const NATIVE_CHAT_SOURCE_PRIORITY: Record<NativeChatSource, number> = {
-  transcript: 3,
+  transcript: 4,
+  rpc: 3,
   hook: 2,
   scrape: 1
 }
