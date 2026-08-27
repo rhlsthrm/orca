@@ -260,6 +260,19 @@ import type {
   OmpRpcRunLocalCommandResult
 } from '../shared/omp-rpc-ipc-contract'
 import type {
+  OmpRpcChatAbortArgs,
+  OmpRpcChatAcquireArgs,
+  OmpRpcChatAcquireResult,
+  OmpRpcChatEventPayload,
+  OmpRpcChatReleaseArgs,
+  OmpRpcChatReleaseResult,
+  OmpRpcChatRespondExtensionUiArgs,
+  OmpRpcChatSendArgs,
+  OmpRpcChatSendResult,
+  OmpRpcChatSubscribeArgs
+} from '../shared/omp-rpc-chat-ipc-contract'
+import type { OmpRpcClientEvent } from '../shared/omp-rpc-protocol'
+import type {
   PreflightRuntimeContext,
   RefreshAgentsResult,
   NativeChatAppendedPayload,
@@ -4563,6 +4576,35 @@ const api = {
       cwd: string
       command: string
     }): Promise<OmpRpcRunLocalCommandResult> => ipcRenderer.invoke('ompRpc:runLocalCommand', args)
+  },
+
+  ompRpcChat: {
+    acquire: (args: OmpRpcChatAcquireArgs): Promise<OmpRpcChatAcquireResult> =>
+      ipcRenderer.invoke('ompRpcChat:acquire', args),
+    release: (args: OmpRpcChatReleaseArgs): Promise<OmpRpcChatReleaseResult> =>
+      ipcRenderer.invoke('ompRpcChat:release', args),
+    send: (args: OmpRpcChatSendArgs): Promise<OmpRpcChatSendResult> =>
+      ipcRenderer.invoke('ompRpcChat:send', args),
+    abort: (args: OmpRpcChatAbortArgs): Promise<OmpRpcChatSendResult> =>
+      ipcRenderer.invoke('ompRpcChat:abort', args),
+    respondExtensionUi: (args: OmpRpcChatRespondExtensionUiArgs): Promise<boolean> =>
+      ipcRenderer.invoke('ompRpcChat:respondExtensionUi', args),
+    subscribe: (
+      args: OmpRpcChatSubscribeArgs,
+      onEvent: (event: OmpRpcClientEvent) => void
+    ): (() => void) => {
+      const listener = (_event: Electron.IpcRendererEvent, payload: OmpRpcChatEventPayload) => {
+        if (payload.subscriptionId === args.subscriptionId) {
+          onEvent(payload.event)
+        }
+      }
+      ipcRenderer.on('ompRpcChat:event', listener)
+      ipcRenderer.send('ompRpcChat:subscribe', args)
+      return () => {
+        ipcRenderer.removeListener('ompRpcChat:event', listener)
+        ipcRenderer.send('ompRpcChat:unsubscribe', { subscriptionId: args.subscriptionId })
+      }
+    }
   },
 
   runtime: {
