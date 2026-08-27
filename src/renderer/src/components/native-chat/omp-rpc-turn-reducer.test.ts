@@ -285,7 +285,14 @@ describe('selectOmpRpcOverlayMessages', () => {
     expect(messages).toEqual([])
   })
 
-  it('drops the overlay once the turn is no longer working', () => {
+  // W6-1 (CRITICAL, third-lab review q2): a terminal agent_end must not blank
+  // the just-finished reply. RPC's agent_end arrives over an already-open
+  // stdout pipe with no debounce, while the transcript update goes through a
+  // 150ms filesystem-watcher debounce plus IPC plus a re-render — so gating
+  // overlay visibility on the binary `working` flag flickered the reply off
+  // and back on. The overlay must persist until the transcript demonstrably
+  // covers it, whether or not the turn is still working.
+  it('keeps rendering the reply after a terminal agent_end until the transcript catches up', () => {
     const state = reduceAll([
       { kind: 'agent-start', frame: { type: 'agent_start' } },
       {
@@ -297,7 +304,44 @@ describe('selectOmpRpcOverlayMessages', () => {
       },
       { kind: 'agent-end', frame: { type: 'agent_end' } }
     ])
-    expect(selectOmpRpcOverlayMessages(state, [])).toEqual([])
+    const messages = selectOmpRpcOverlayMessages(state, [])
+    expect(messages).toHaveLength(1)
+    expect(messages[0]).toMatchObject({
+      id: OMP_RPC_OVERLAY_ASSISTANT_ID,
+      role: 'assistant',
+      source: 'rpc'
+    })
+  })
+
+  it('drops the overlay once the transcript catches up after a terminal agent_end', () => {
+    const state = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'Hello' }
+        }
+      },
+      { kind: 'agent-end', frame: { type: 'agent_end' } }
+    ])
+    expect(selectOmpRpcOverlayMessages(state, [transcriptAssistant('Hello there')])).toEqual([])
+  })
+
+  it('keeps rendering reasoning after a terminal agent_end until the transcript catches up', () => {
+    const state = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking hard' }
+        }
+      },
+      { kind: 'agent-end', frame: { type: 'agent_end' } }
+    ])
+    const messages = selectOmpRpcOverlayMessages(state, [])
+    expect(messages.map((m) => m.id)).toEqual([OMP_RPC_OVERLAY_REASONING_ID])
   })
 
   it('shows a reasoning overlay ahead of the reply overlay', () => {

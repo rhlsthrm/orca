@@ -23,24 +23,19 @@ export function nativeChatAssistantText(message: NativeChatMessage | undefined):
 }
 
 /**
- * Whether an in-progress overlay's text should still be shown against the
- * settled transcript: only while it leads — i.e. it's longer than (and not
- * already contained in) the last assistant turn. Once the real turn lands with
- * the same (or more) text, the overlay is suppressed so it can't duplicate or
- * flicker as the transcript catches up. `working` gates it outright: a stale
- * overlay from a finished turn never shows. Shared by the hook-preview bubble
- * and the RPC turn-stream overlay (native-chat/omp-rpc-turn-reducer.ts) so the
- * anti-duplication rule can't drift between the two live-preview sources.
+ * Content-only leads comparison: whether the overlay text is longer than
+ * (and not already contained in) the last assistant turn's text. No
+ * liveness gate — pure content coverage. For a caller whose overlay must
+ * keep rendering past a lifecycle boundary (e.g. a just-completed RPC turn)
+ * until the transcript demonstrably catches up, not merely until the turn
+ * ends — see native-chat/omp-rpc-turn-reducer.ts, which uses this directly
+ * instead of `nativeChatOverlayLeadsTranscript`.
  */
-export function nativeChatOverlayLeadsTranscript(args: {
+export function nativeChatOverlayLeadsTranscriptContent(args: {
   messages: readonly NativeChatMessage[]
   overlayText: string
-  working: boolean
 }): boolean {
-  const { messages, overlayText, working } = args
-  if (!working) {
-    return false
-  }
+  const { messages, overlayText } = args
   const text = overlayText.trim()
   if (!text) {
     return false
@@ -50,8 +45,13 @@ export function nativeChatOverlayLeadsTranscript(args: {
 }
 
 /**
- * Decide the streaming text to show, or null to show nothing. See
- * `nativeChatOverlayLeadsTranscript` for the show/hide rule.
+ * Decide the streaming text to show, or null to show nothing: gated on
+ * `working` outright (a stale preview from a finished turn never shows),
+ * then on `nativeChatOverlayLeadsTranscriptContent`'s content comparison.
+ * The RPC turn-stream overlay (native-chat/omp-rpc-turn-reducer.ts) calls
+ * `nativeChatOverlayLeadsTranscriptContent` directly instead, since its
+ * overlay must persist past `working` flipping false until the transcript
+ * catches up.
  */
 export function deriveNativeChatStreamingText(args: {
   messages: readonly NativeChatMessage[]
@@ -59,8 +59,11 @@ export function deriveNativeChatStreamingText(args: {
   working: boolean
 }): string | null {
   const { messages, previewText, working } = args
+  if (!working) {
+    return null
+  }
   const text = previewText?.trim() ?? ''
-  return nativeChatOverlayLeadsTranscript({ messages, overlayText: text, working }) ? text : null
+  return nativeChatOverlayLeadsTranscriptContent({ messages, overlayText: text }) ? text : null
 }
 
 /** Build the synthetic streaming assistant message for the given text. */

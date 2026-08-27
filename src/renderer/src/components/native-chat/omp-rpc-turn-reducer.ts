@@ -19,7 +19,7 @@
 // `assistantMessageEvent` stream is assistant-only by construction.
 
 import type { NativeChatBlock, NativeChatMessage } from '../../../../shared/native-chat-types'
-import { nativeChatOverlayLeadsTranscript } from '../../../../shared/native-chat-streaming'
+import { nativeChatOverlayLeadsTranscriptContent } from '../../../../shared/native-chat-streaming'
 import type {
   OmpRpcClientEvent,
   OmpRpcExtensionUiRequestFrame
@@ -306,25 +306,31 @@ function transcriptToolCallIds(messages: readonly NativeChatMessage[]): Set<stri
   return ids
 }
 
-/** In-progress overlay messages to render, gated by the same leads-vs-
- *  transcript rule as the hook preview bubble (never double-rendered). Order:
- *  reasoning before the reply, matching how a "thinking" bubble reads before
- *  the assistant's answer. Text and tool blocks are gated independently
- *  (F8): a tool-first turn (empty assistantText) still shows its in-flight
- *  tool blocks, and a text-length tie against the transcript hides only the
- *  text block, not tool blocks the transcript hasn't caught up to yet. */
+/** In-progress overlay messages to render, gated by content-only leads-vs-
+ *  transcript coverage (F13/W6-1) — never the binary `working` flag. A turn
+ *  completing (agent_end) and the transcript tailer surfacing that same turn
+ *  race independently (RPC's agent_end has no debounce; the transcript path
+ *  has a 150ms filesystem-watcher debounce plus IPC plus a re-render), so
+ *  gating on `working` blanked the just-finished reply and then reflowed it
+ *  back in once the transcript caught up. The overlay now fades out only
+ *  once content coverage says so, whether or not the turn is still working;
+ *  `working` remains the D5 status/Stop signal (`isOmpRpcTurnActive`) and is
+ *  not read here. Order: reasoning before the reply, matching how a
+ *  "thinking" bubble reads before the assistant's answer. Text and tool
+ *  blocks are gated independently (F8): a tool-first turn (empty
+ *  assistantText) still shows its in-flight tool blocks, and a text-length
+ *  tie against the transcript hides only the text block, not tool blocks the
+ *  transcript hasn't caught up to yet. */
 export function selectOmpRpcOverlayMessages(
   state: OmpRpcTurnState,
   transcriptMessages: readonly NativeChatMessage[]
 ): NativeChatMessage[] {
-  const working = state.status === 'working'
   const messages: NativeChatMessage[] = []
   if (
     state.reasoningText.trim() &&
-    nativeChatOverlayLeadsTranscript({
+    nativeChatOverlayLeadsTranscriptContent({
       messages: transcriptMessages,
-      overlayText: state.reasoningText,
-      working
+      overlayText: state.reasoningText
     })
   ) {
     messages.push({
@@ -337,23 +343,20 @@ export function selectOmpRpcOverlayMessages(
   }
   const textLeads =
     state.assistantText.trim().length > 0 &&
-    nativeChatOverlayLeadsTranscript({
+    nativeChatOverlayLeadsTranscriptContent({
       messages: transcriptMessages,
-      overlayText: state.assistantText,
-      working
+      overlayText: state.assistantText
     })
   const knownToolCallIds = transcriptToolCallIds(transcriptMessages)
-  const visibleBlocks = working
-    ? state.blocks.filter((block) => {
-        if (block.type === 'text') {
-          return textLeads
-        }
-        if (block.type === 'tool-call' || block.type === 'tool-result') {
-          return !(block.toolCallId && knownToolCallIds.has(block.toolCallId))
-        }
-        return true
-      })
-    : []
+  const visibleBlocks = state.blocks.filter((block) => {
+    if (block.type === 'text') {
+      return textLeads
+    }
+    if (block.type === 'tool-call' || block.type === 'tool-result') {
+      return !(block.toolCallId && knownToolCallIds.has(block.toolCallId))
+    }
+    return true
+  })
   if (visibleBlocks.length > 0) {
     messages.push({
       id: OMP_RPC_OVERLAY_ASSISTANT_ID,
