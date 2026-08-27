@@ -91,6 +91,11 @@ export class OmpRpcChatSessionRegistry {
   private readonly owner: OmpRpcSessionOwner
   private readonly sessionsByPaneKey = new Map<string, OmpRpcChatSession>()
   private readonly claimsByPaneKey = new Map<string, AgentSessionExecutionClaim>()
+  // Why (finding C, cross-lab review): exposed via `claimedSessionFilePaths()`
+  // so the identity resolver's mtime fallback (omp-terminal-session-identity.ts)
+  // can exclude a session another live pane already claimed, before a second
+  // pane sharing the same cwd bucket is ever offered it.
+  private readonly sessionFilePathsByPaneKey = new Map<string, string>()
   // Why (F5): acquire/release for one paneKey must never race each other or
   // themselves — an in-flight release holds the RPC claim up to the 15s
   // settle+exit-proof window, and React StrictMode double-mounts fire two
@@ -106,18 +111,24 @@ export class OmpRpcChatSessionRegistry {
   private readonly generationByPaneKey = new Map<string, number>()
 
   constructor(
-    dependencies: {
-      spawnClient?: ConstructorParameters<typeof OmpRpcSessionOwner>[0]['spawnClient']
-    } = {}
+    dependencies: Omit<ConstructorParameters<typeof OmpRpcSessionOwner>[0], 'registry'> = {}
   ) {
     this.owner = new OmpRpcSessionOwner({
       registry: this.ptyOwnerRegistry,
-      spawnClient: dependencies.spawnClient
+      ...dependencies
     })
   }
 
   get(paneKey: string): OmpRpcChatSession | null {
     return this.sessionsByPaneKey.get(paneKey) ?? null
+  }
+
+  /** Session file paths currently claimed by a live pane (finding C) — read
+   *  by the identity resolver's mtime-fallback candidate scan so a session
+   *  another pane already owns is never offered to a second pane sharing
+   *  the same cwd bucket. */
+  claimedSessionFilePaths(): ReadonlySet<string> {
+    return new Set(this.sessionFilePathsByPaneKey.values())
   }
 
   async acquire(args: OmpRpcChatAcquireArgs): Promise<OmpRpcChatAcquireResult> {
@@ -191,6 +202,7 @@ export class OmpRpcChatSessionRegistry {
       }
       this.sessionsByPaneKey.set(args.paneKey, session)
       this.claimsByPaneKey.set(args.paneKey, claim)
+      this.sessionFilePathsByPaneKey.set(args.paneKey, args.sessionFilePath)
       return { status: 'acquired', session }
     }
     if (result.status === 'live' || result.status === 'unverifiable') {
@@ -202,8 +214,11 @@ export class OmpRpcChatSessionRegistry {
     return { status: 'spawn-failed', reason: result.reason }
   }
 
-  /** Always disposes the RPC child, proof-gated: never leaves an RPC child
-   *  holding the session hostage after the pane stops watching it. Tracked
+  /** Proof-gated: disposes the RPC child and releases the claim only once
+   *  `handoffToPty` proves the turn settled and the child genuinely exited
+   *  (Critical B, wave 5) — never unconditionally, which would silently
+   *  kill a still-streaming turn. A release that cannot prove this fails
+   *  closed (`released: false`), keeping the session registered. Tracked
    *  in `pendingReleaseByPaneKey` so a concurrent `acquire` for the same
    *  pane waits for this to finish instead of racing it into a spurious
    *  `agent_session_conflict` (F5) — the claim stays held for the whole
@@ -225,29 +240,38 @@ export class OmpRpcChatSessionRegistry {
     if (!session) {
       return { released: false }
     }
-    this.sessionsByPaneKey.delete(paneKey)
-    this.claimsByPaneKey.delete(paneKey)
-    await this.owner.handoffToPty({
+    const result = await this.owner.handoffToPty({
       session: session.owned,
       baseCommand: 'omp',
       shell: process.platform === 'win32' ? 'cmd' : 'posix'
     })
-    // Why: handoffToPty's early-return paths (a settle-wait or getState that
-    // never proves settlement) can leave the underlying client undisposed and
-    // its claim still held. Force both unconditionally so leaving chat view
-    // never leaks a connected RPC child or permanently blocks a future
-    // acquisition of the same session identity; releaseRpc is a safe no-op
-    // when handoffToPty already released it via the 'exited' path.
-    session.owned.client.dispose()
-    this.ptyOwnerRegistry.releaseRpc(session.owned.owner)
+    if (result.status !== 'exited') {
+      // Why (Critical B, cross-lab review): fail closed. A turn that never
+      // proves settled/exited within handoffToPty's bounded wait must keep
+      // holding the RPC claim, not have its (possibly still-streaming)
+      // child force-disposed out from under it — the OLD code disposed and
+      // released unconditionally here regardless of this result, which is
+      // exactly the "silently kill live work" bug this wave fixes. The
+      // session stays registered so a later release attempt, or a
+      // returning acquire (which finds and reuses it), can still act on it.
+      return { released: false }
+    }
+    // handoffToPty's 'exited' path already disposed the client and released
+    // the ptyOwner claim (dispose -> proveExit -> releaseRpc) before
+    // returning — nothing left to force here.
+    this.sessionsByPaneKey.delete(paneKey)
+    this.claimsByPaneKey.delete(paneKey)
+    this.sessionFilePathsByPaneKey.delete(paneKey)
     session.dispose()
     return { released: true }
   }
 
-  /** Matches `release`'s teardown order: dispose the transport (the only
-   *  thing that SIGTERMs the child), release the claim, then the session's
-   *  own listener teardown — so an app quit mid-turn cannot orphan an
-   *  `omp --mode rpc` child that keeps writing the session (F4/D2). */
+  /** Unlike `release` (which now waits on `handoffToPty`'s settle-then-exit
+   *  ordering and can fail closed, keeping the claim), app quit cannot wait
+   *  — dispose the transport (the only thing that SIGTERMs the child),
+   *  release the claim, then the session's own listener teardown, so an app
+   *  quit mid-turn cannot orphan an `omp --mode rpc` child that keeps
+   *  writing the session (F4/D2). */
   disposeAll(): void {
     for (const session of this.sessionsByPaneKey.values()) {
       session.owned.client.dispose()
@@ -256,5 +280,6 @@ export class OmpRpcChatSessionRegistry {
     }
     this.sessionsByPaneKey.clear()
     this.claimsByPaneKey.clear()
+    this.sessionFilePathsByPaneKey.clear()
   }
 }

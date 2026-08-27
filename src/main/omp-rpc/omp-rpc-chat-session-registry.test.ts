@@ -14,7 +14,13 @@ function makeRegistry(): OmpRpcChatSessionRegistry {
           {
             sessionState: {
               sessionFile: null,
-              sessionId: null,
+              // Why: a real OMP RPC child always reports a sessionId once
+              // acquired (Decision 2 in docs/omp-rpc-chat-adapter-plan.md —
+              // it is the claim identity) — this fixture is left non-null
+              // so `release()` genuinely reaches handoffToPty's 'exited'
+              // path instead of short-circuiting on 'ownership-unknown'
+              // (a wrong-shaped fixture would silently mask that path).
+              sessionId: 'session-a',
               isStreaming: false,
               isCompacting: false,
               queuedMessageCount: 0
@@ -305,5 +311,52 @@ describe('OmpRpcChatSessionRegistry', () => {
     })
     const released = await registry.release('tab:leaf')
     expect(Object.keys(released)).toEqual(['released'])
+  })
+
+  // Critical B (cross-lab review, wave 5): a release whose turn never
+  // settles must fail closed — keep the session registered and never
+  // dispose/force-release the claim out from under still-streaming work
+  // (the OLD code unconditionally disposed and returned `released: true`
+  // here regardless of what handoffToPty reported).
+  it('fails closed and keeps the session when the turn never settles (Critical B)', async () => {
+    const registry = new OmpRpcChatSessionRegistry({
+      spawnClient: () => {
+        const client = spawnOmpRpcClient(
+          createFakeOmpRpcChild(
+            {
+              sessionState: {
+                sessionFile: null,
+                sessionId: 'session-a',
+                isStreaming: true,
+                isCompacting: false,
+                queuedMessageCount: 0
+              }
+            },
+            'session-owning'
+          ).spawnOptions
+        ) as unknown as OmpSessionOwningRpcClient
+        clients.add(client)
+        return client
+      },
+      waitForSettle: async () => ({
+        status: 'unverifiable',
+        reason: 'OMP RPC session did not settle before timeout'
+      })
+    })
+    const acquired = await registry.acquire({
+      paneKey: 'tab:leaf',
+      ptyId: 'pty-1',
+      cwd: '/work',
+      executablePath: 'omp',
+      sessionFile: '/sessions/a.jsonl',
+      sessionFilePath: '/sessions/a.jsonl',
+      isPtyAlive: () => false
+    })
+    expect(acquired.status).toBe('acquired')
+
+    const released = await registry.release('tab:leaf')
+
+    expect(released).toEqual({ released: false })
+    expect(registry.get('tab:leaf')).not.toBeNull()
   })
 })
