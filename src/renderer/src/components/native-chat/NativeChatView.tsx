@@ -10,6 +10,9 @@ import { NativeChatComposer, type NativeChatComposerHandle } from './NativeChatC
 import { useNativeChatFontScale } from './use-native-chat-font-scale'
 import { useNativeChatCanSend } from './use-native-chat-can-send'
 import { NativeChatInteractiveCard } from './NativeChatInteractiveCard'
+import { NativeChatExtensionUiCard } from './NativeChatExtensionUiCard'
+import { useNativeChatOmpRpcIntegration } from './use-native-chat-omp-rpc-integration'
+import { useOmpRpcProbeCwd } from './use-omp-rpc-commands'
 import { NativeChatEmptyState } from './NativeChatEmptyState'
 import { NativeChatSessionGate } from './NativeChatSessionGate'
 import { useNativeChatInteractiveSend } from './use-native-chat-interactive-send'
@@ -20,8 +23,6 @@ import {
 } from './native-chat-working-suppression'
 import {
   appendPendingSendCache,
-  launchPromptAsMessage,
-  pendingSendsAsMessages,
   nextNativeChatPendingSendId,
   prunePendingSends,
   readPendingSendCache,
@@ -31,16 +32,11 @@ import {
 } from './native-chat-pending'
 import {
   appendCommandMarkerCache,
-  applyCommandMarkerBoundaries,
-  commandMarkersAsMessages,
   readCommandMarkerCache,
   type NativeChatCommandMarker,
   type NativeChatCommandMarkerOutcome
 } from './native-chat-command-marker'
-import {
-  deriveNativeChatStreamingText,
-  nativeChatStreamingMessage
-} from '../../../../shared/native-chat-streaming'
+import { useNativeChatMessageListSession } from './use-native-chat-message-list-session'
 import {
   shouldFocusNativeChatComposerFromEditingKey,
   shouldFocusNativeChatPaneFromPointerTarget,
@@ -134,6 +130,33 @@ function NativeChatResolvedView({
     runtimeEnvironmentId,
     enabled: isVisible
   })
+  const ompRpcCwd = useOmpRpcProbeCwd(agent, terminalTabId)
+  // The agent's in-progress reply preview (hook), shown as a live streaming
+  // bubble while it works — before the completed turn flushes to the transcript.
+  // Read here (rather than at first use) so the RPC integration below can
+  // enforce D5's "one live overlay only" exclusivity against it.
+  const hookPreview = useAppStore((s) => s.agentStatusByPaneKey[paneKey]?.lastAssistantMessage)
+  const ompRpc = useNativeChatOmpRpcIntegration({
+    agent,
+    paneKey,
+    ptyId: targetPtyId,
+    cwd: ompRpcCwd,
+    // OMP resumes by session id, not a transcript path (see
+    // use-omp-rpc-chat-session.ts) — sessionId is what's actually known here.
+    sessionFile: sessionId,
+    isVisible,
+    runtimeEnvironmentId,
+    transcriptMessages: session.messages,
+    hookPreview
+  })
+  // D5: session.status reads 'working' while the RPC turn streams, even
+  // before any hook/transcript evidence exists for this pane.
+  const sessionWithOmpRpcStatus = useMemo<typeof session>(() => {
+    if (!ompRpc.statusOverride || session.status === ompRpc.statusOverride) {
+      return session
+    }
+    return { ...session, status: ompRpc.statusOverride }
+  }, [session, ompRpc.statusOverride])
   const launchPrompt = useAppStore((s) => s.nativeChatLaunchPromptByTabId[terminalTabId] ?? null)
   const clearNativeChatLaunchPrompt = useAppStore((s) => s.clearNativeChatLaunchPrompt)
   const paneLaunchPrompt = launchPrompt?.agent === agent ? launchPrompt : null
@@ -150,10 +173,7 @@ function NativeChatResolvedView({
   })
   // The live-session merge reconciles hooks with replayable transcript turn
   // boundaries; all working consumers must use that one lifecycle decision.
-  const liveWorking = session.status === 'working'
-  // The agent's in-progress reply preview (hook), shown as a live streaming
-  // bubble while it works — before the completed turn flushes to the transcript.
-  const hookPreview = useAppStore((s) => s.agentStatusByPaneKey[paneKey]?.lastAssistantMessage)
+  const liveWorking = sessionWithOmpRpcStatus.status === 'working'
   // Why: Stop suppression must clear on a newer working epoch even when status
   // never leaves 'working' (interrupt + immediate next turn coalesced).
   const hookWorkingEpoch = useAppStore(
@@ -265,61 +285,16 @@ function NativeChatResolvedView({
     [commandMarkerScope]
   )
 
-  const launchPromptMessage = useMemo(
-    () => launchPromptAsMessage(paneLaunchPrompt, session.messages),
-    [paneLaunchPrompt, session.messages]
-  )
-  const sessionWithLaunchPrompt = useMemo<typeof session>(() => {
-    if (!launchPromptMessage) {
-      return session
-    }
-    return { ...session, messages: [...session.messages, launchPromptMessage] }
-  }, [launchPromptMessage, session])
-
-  const sessionAfterCommandBoundaries = useMemo<typeof session>(() => {
-    const messages = applyCommandMarkerBoundaries(sessionWithLaunchPrompt.messages, commandMarkers)
-    return messages === sessionWithLaunchPrompt.messages
-      ? sessionWithLaunchPrompt
-      : { ...sessionWithLaunchPrompt, messages }
-  }, [sessionWithLaunchPrompt, commandMarkers])
-  const failedLaunchPromptMessageIds = useMemo(() => {
-    const id = paneLaunchPrompt?.failed ? launchPromptMessage?.id : null
-    if (!id || !sessionAfterCommandBoundaries.messages.some((message) => message.id === id)) {
-      return undefined
-    }
-    return new Set([id])
-  }, [paneLaunchPrompt?.failed, launchPromptMessage?.id, sessionAfterCommandBoundaries.messages])
-
-  // The streaming preview bubble (if any) sits after the transcript but before
-  // the optimistic user echoes — same order mobile uses.
-  const pendingMessages = useMemo(
-    () => pendingSendsAsMessages(pending, sessionAfterCommandBoundaries.messages),
-    [pending, sessionAfterCommandBoundaries.messages]
-  )
-  const streamingText = useMemo(() => {
-    return deriveNativeChatStreamingText({
-      messages:
-        pendingMessages.length > 0
-          ? [...sessionAfterCommandBoundaries.messages, ...pendingMessages]
-          : sessionAfterCommandBoundaries.messages,
-      previewText: hookPreview,
-      working: liveWorking
+  const { sessionAfterCommandBoundaries, sessionWithPending, failedLaunchPromptMessageIds } =
+    useNativeChatMessageListSession({
+      session: sessionWithOmpRpcStatus,
+      paneLaunchPrompt,
+      commandMarkers,
+      pending,
+      liveWorking,
+      hookPreview: ompRpc.effectiveHookPreview,
+      overlayMessages: ompRpc.overlayMessages
     })
-  }, [sessionAfterCommandBoundaries.messages, pendingMessages, hookPreview, liveWorking])
-  const sessionWithPending = useMemo<typeof session>(() => {
-    if (pending.length === 0 && commandMarkers.length === 0 && !streamingText) {
-      return sessionAfterCommandBoundaries
-    }
-    return {
-      ...sessionAfterCommandBoundaries,
-      messages: [
-        ...sessionAfterCommandBoundaries.messages,
-        ...commandMarkersAsMessages(commandMarkers),
-        ...(streamingText ? [nativeChatStreamingMessage(streamingText)] : []),
-        ...pendingMessages
-      ]
-    }
-  }, [sessionAfterCommandBoundaries, pending, pendingMessages, commandMarkers, streamingText])
   // Derive the view state from the pending-augmented session so a send into an
   // otherwise-empty conversation flips to the list (showing the queued bubble)
   // instead of staying on the empty state.
@@ -356,8 +331,14 @@ function NativeChatResolvedView({
     // settles, so cancelPendingSends no longer sees the optimistic id. Clear
     // the echo cache here so a cancelled prompt cannot stick as a ghost bubble.
     setPending(writePendingSendCache(pendingScope, []))
+    if (ompRpc.isRpcOwned) {
+      // The RPC child, not the (already-exited) original PTY, owns this
+      // turn — an ESC keystroke would land nowhere.
+      void ompRpc.abortChat()
+      return
+    }
     interactiveSend.cancel()
-  }, [interactiveSend, pendingScope])
+  }, [interactiveSend, pendingScope, ompRpc])
   const nativeChatFileLinkClick = useNativeChatFileLinkClick(fileLinkContext)
 
   // Chat-only font zoom via Cmd/Ctrl +/-/0, gated to the live conversation so
@@ -422,20 +403,31 @@ function NativeChatResolvedView({
       </div>
       {/* Live interactive prompt (question / approval) is the bottom input region
           (mobile parity). A question card supplies its own answer input, so it
-          fully replaces the composer while active — no stray "Send a message". */}
-      <NativeChatInteractiveCard
-        paneKey={paneKey}
-        send={interactiveSend}
-        canSend={canSend}
-        messages={sessionAfterCommandBoundaries.messages}
-        transcriptSettled={session.readPhase === 'ready'}
-        onShowingQuestionChange={setQuestionActive}
-        answerInputRef={questionAnswerInputRef}
-      />
+          fully replaces the composer while active — no stray "Send a message".
+          An RPC-owned pane's PTY is no longer running the agent, so its hook
+          state is stale; extension_ui_request (D7) is the only live surface. */}
+      {ompRpc.isRpcOwned ? (
+        ompRpc.pendingExtensionUiRequest ? (
+          <NativeChatExtensionUiCard
+            request={ompRpc.pendingExtensionUiRequest}
+            onAnswer={ompRpc.answerExtensionUi}
+          />
+        ) : null
+      ) : (
+        <NativeChatInteractiveCard
+          paneKey={paneKey}
+          send={interactiveSend}
+          canSend={canSend}
+          messages={sessionAfterCommandBoundaries.messages}
+          transcriptSettled={session.readPhase === 'ready'}
+          onShowingQuestionChange={setQuestionActive}
+          answerInputRef={questionAnswerInputRef}
+        />
+      )}
       {/* canSend reflects the mobile presence-lock: when a mobile client holds
           the pty, the composer shows its guarded state instead of racing the
           mobile driver (R8). */}
-      {questionActive ? null : (
+      {questionActive || (ompRpc.isRpcOwned && ompRpc.pendingExtensionUiRequest !== null) ? null : (
         <NativeChatComposer
           ref={composerRef}
           terminalTabId={terminalTabId}
@@ -450,6 +442,11 @@ function NativeChatResolvedView({
           onSlashCommand={onSlashCommand}
           onSwitchToTerminal={onSwitchToTerminal}
           readTerminalScreen={readTerminalScreen}
+          ompRpcChat={{
+            isOwned: ompRpc.isRpcOwned,
+            isTurnWorking: ompRpc.isRpcTurnWorking,
+            send: ompRpc.sendChat
+          }}
           {...launchDraftSignal}
         />
       )}
