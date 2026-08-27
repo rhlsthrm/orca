@@ -31,6 +31,13 @@ This document records only decisions and live-probe facts that code does not car
 | `aba1a9214` | Env-gated live probe against the installed `omp` (`ORCA_OMP_RPC_LIVE=1`) |
 | `763add4d4` | Registers OMP `session_start` across four gates; also fixes a latent `prime-agent` drop |
 | `a818b1d02` | Exclusive session ownership + proof-gated RPC↔PTY handoff (61 tests) |
+| `8bb585d97` | **Wave 1.** Turn-lifecycle frames, extension_ui_request/response, steer/follow_up; `OmpRpcChatSession`/`OmpRpcChatSessionRegistry` (per-pane RPC ownership via `OmpRpcSessionOwner.handoffFromPty`); `ompRpcChat:*` IPC surface (acquire/release/send/abort/respondExtensionUi + subscribe push channel) |
+| `9d569c481` | **Wave 1.** `ompRpcChat` exposed through preload (`src/preload/api/omp-rpc-chat-api.ts`) |
+| `88d0af8e4` | **Wave 1.** `rpc` NativeChatSource; `omp-rpc-turn-reducer.ts` — pure reducer building the in-progress-turn overlay + one-pending-plus-queue extension-ui tracking. Verified live (omp 18.0.6): RPC message-in-progress frames carry no id matching any transcript entry, so RPC content is never id-merged (D4) — it renders as a leads-gated overlay instead, generalizing the hook-preview "leads" suppression so double-rendering a turn is impossible by construction |
+| `c6e923344` | **Wave 2.** `use-omp-rpc-chat-session.ts` binds a pane to the acquired session (acquire/subscribe/release lifecycle, leak-free on unmount/view-away/pane-close/identity-rebind); `use-native-chat-omp-rpc-integration.ts` composes it into the overlay/status projections the view needs |
+| `c22913b1a` | **Wave 2.** `NativeChatExtensionUiCard.tsx` — select/confirm/input/editor rendering for `extension_ui_request` (D7) |
+| `9e2af8bb7` | **Wave 2.** `use-omp-rpc-chat-send.ts` + composer wiring — chat prompts route through the RPC session before the PTY fallback (D6); "Follow up" affordance |
+| `ca83db743` | **Wave 2.** `NativeChatView.tsx` wiring — RPC overlay spliced into the message list, D5 status override, extension-UI card swap, Stop routed through `abort()` |
 
 Note: commits are listed in dependency order, not `git log` order.
 
@@ -64,16 +71,48 @@ Note: commits are listed in dependency order, not `git log` order.
 - **Raw frames:** opt-in, bounded diagnostic capture. Not a durable ledger.
 - No dynamic third-party adapter loader and no arbitrary renderer code — built-in adapter
   only, against #10099's contract.
+- **D5 — status derives from the RPC turn, not the hook, while RPC owns the
+  pane.** `session.status` is overridden to `'working'` whenever
+  `isOmpRpcTurnActive` is true, so Stop/isWorking/viewState react to the RPC
+  stream instead of a hook that a PTY-exited pane will never emit again.
+- **D2 (verified during wave 2, not just assumed).** Plain local "New tab ->
+  OMP" never registers a claim in the runtime's shared
+  `ClaimedAgentPtyOwnerRegistry` (`src/main/ipc/pty/pane/agent-session-owners.ts`)
+  — that registry is populated only by the remote/paired-device resume path
+  (`terminal.ensureAgentSession`/`createAgentSession`), never by a local
+  `pty:spawn`. Real dual-writer safety for the RPC<->PTY handoff comes from
+  `isLocalPtyAlive` (a genuine OS-level `provider.hasPty(ptyId)` check) plus
+  `OmpRpcSessionOwner`'s fail-closed exit-proof gates, not from registry
+  sharing with that global registry. This is why `OmpRpcChatSessionRegistry`
+  is deliberately its own isolated `ClaimedAgentPtyOwnerRegistry` instance.
+- **sessionFile is a session id, not a path, for OMP.** OMP resumes by session
+  id (`agent-status-extension-source.ts`, #8962) — its hook never reports a
+  `session_file`, unlike pi/prime-agent. `use-omp-rpc-chat-session.ts` passes
+  the pane's resolved `sessionId` as the contract's `sessionFile` argument.
 
 ## Open work, in recommended order
 
-1. **Streaming turns over RPC** — `prompt` / `steer` / `follow_up` / `abort`, message and
-   tool frames into `NativeChat`. Do this next, and note it *subsumes* item 2: because
-   `a818b1d02` gives the RPC child session ownership, the chat view can read from the
-   session it already owns instead of depending on transcript resolution.
-2. **Hook delivery to the renderer for OMP panes** — currently broken end to end. Four
-   code gates were fixed in `763add4d4` and unit-proven, but a live pane still records
-   nothing after a *complete* turn. Proven chain: no hook event → `recordAgentProviderSession`
+1. ~~Streaming turns over RPC~~ — **shipped (waves 1-2).** `prompt`/`steer`/
+   `follow_up`/`abort`, message/tool/turn frames, and `extension_ui_request`
+   are wired end-to-end into `NativeChat`: acquire/subscribe/release
+   lifecycle, overlay rendering, D5 status override, composer send routing,
+   the Follow up affordance, and the extension-UI card.
+   **Handoff trigger — the one thing still gating it live.** `acquire()`
+   only succeeds when the pane's PTY has *already exited* (it refuses,
+   correctly, to kill a live PTY — see D2 above). Whether chat-view
+   activation should kill-and-resume a live PTY is a product decision the
+   user is making separately; wave 2 built the entire feature against the
+   existing `OmpRpcChatAcquireResult` contract unchanged, so only the
+   acquisition call site will need to change when that decision lands — no
+   rework in the renderer. Until then, RPC engages only for panes whose PTY
+   already exited on its own (e.g. a resumed/sleeping session), not a
+   normal live "New tab -> OMP" pane.
+2. **Hook delivery to the renderer for OMP panes** — still broken end to end
+   (unrelated to the handoff trigger above, and a second reason RPC rarely
+   engages today: `sessionFile`/`sessionId` is what gates acquisition, and
+   it comes from this same broken hook chain). Four code gates were fixed in
+   `763add4d4` and unit-proven, but a live pane still records nothing after
+   a *complete* turn. Proven chain: no hook event → `recordAgentProviderSession`
    never fires → no provider session id → `nativeChat.readSession` returns
    `{error:"Transcript unavailable", notFound:true}` → the chat view renders the user
    message but never the assistant reply, and `agentStatusByPaneKey` stays empty. `/usage`
@@ -83,13 +122,16 @@ Note: commits are listed in dependency order, not `git log` order.
    Check whether the extension embeds an endpoint at write time or reads it from env at
    runtime (`src/main/pi/agent-status-extension-source.ts`,
    `src/main/ipc/pty/host-env/pi-agent.ts`, `src/shared/agent-hook-endpoint-file.ts`).
-3. Questions/approvals + extension UI answered over RPC, not synthesized PTY keystrokes.
-4. Subagent frames; unknown-frame diagnostic rendering; opt-in raw capture.
-5. Expand RPC command routing beyond the current `/usage`-only allowlist.
-6. Subscribe to OMP's `session_switch` event — flagged by `763add4d4`, still unsubscribed.
-7. SSH/remote runtime locality; mobile read parity (`nativeChatRequiresLocalTranscript`
-   semantics change once RPC bypasses disk).
-8. Upstream PR against #10099, then UAT.
+3. Subagent frames; unknown-frame diagnostic rendering; opt-in raw capture.
+4. Expand RPC command routing beyond the current `/usage`-only allowlist.
+5. Subscribe to OMP's `session_switch` event — flagged by `763add4d4`, still unsubscribed.
+6. SSH/remote runtime locality; mobile read parity (`nativeChatRequiresLocalTranscript`
+   semantics change once RPC bypasses disk) — the RPC session hook is already
+   local-only-gated (`runtimeEnvironmentId === null`), so this item is scoping
+   the *removal* of that gate, not adding one.
+7. Upstream PR against #10099, then UAT — blocked on items 1's handoff
+   trigger and item 2's hook-delivery bug landing, since neither is
+   meaningfully UAT-able without them.
 
 ## Traps that cost real time
 
@@ -111,8 +153,16 @@ Note: commits are listed in dependency order, not `git log` order.
 
 ## Verification baseline
 
-Full sweep on this branch: 11,626 tests passing / 83 skipped; `tc:node` and `tc:cli`
-clean; `tc:web` clean apart from 9 pre-existing failures in
-`src/renderer/src/components/automations/**` that arrived with upstream `cda2280d6`;
-`electron-vite build` clean. Live: 494-command catalog and `/usage` rendering correctly in
-the dev app.
+Full sweep after wave 2 (`ca83db743`): 62,238 tests passing / 255 skipped, 13
+failing — all 13 pre-existing in `src/renderer/src/components/automations/**`
+(broken by upstream `cda2280d6`; same `hasCustomSchedule`/
+`getAutomationOwnerTarget`/`AutomationsApi.create` breaks `tc:web` reports).
+Zero failures in any `native-chat`/`omp-rpc` file. `tc:node` and `tc:cli`
+clean; `tc:web` clean apart from the same 9 pre-existing `automations/**`
+errors. (Earlier baseline of 11,626/83 predates unrelated test growth
+elsewhere in the tree; re-measure from this note going forward, not that
+figure.) Live: 494-command catalog and `/usage` rendering correctly in the
+dev app (wave 1). Wave 2 shipped without a fresh live OMP probe per its
+brief — the fake child (`fake-omp-rpc-child.ts`) covers the frames, and the
+one live-gating fact this wave needed (D2's PTY-claim isolation) was
+verified by reading the runtime code paths, not a live run.
