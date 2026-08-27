@@ -52,6 +52,8 @@ This document records only decisions and live-probe facts that code does not car
 | `393e51f7a` | **Wave 5.** `performRelease` only tears down and reports `released:true` on `handoffToPty`'s `'exited'` path — any other result fails closed (`released:false`), keeping the claim. Registry also tracks each pane's claimed session file path, exposed via `claimedSessionFilePaths()` (finding C's exclusion set) |
 | `5b9cc9bee` | **Wave 5.** `omp-terminal-session-identity.ts` hardening: cwd normalization (realpath + trailing-slash strip, finding D) before breadcrumb/bucket comparison; `claimedSessionFilePaths` excludes another live pane's session from the mtime fallback (finding C) |
 | `ab67e6711` | **Wave 5.** `ompRpcChat:release` pushes `ompRpcChat:handback` to the requesting sender once a respawn-intent release genuinely settles+exits; `use-omp-rpc-chat-handback-listener.ts`, wired into `TerminalPane` (stays mounted underneath `NativeChatView` through a "leave Chat view" unmount), performs the actual PTY respawn via the unchanged `respawnPtyForOmpRpcChatHandback`. Also wires finding E (`resolveSessionIdentity` verifies pty locality before scanning local disk) and finding C's exclusion set |
+| `b6627f37d` | **Wave 6.** W6-1: fixes the turn-completion flicker — `selectOmpRpcOverlayMessages` no longer gates fade-out on the binary `working` flag (a terminal `agent_end` has no debounce; the transcript path has a 150ms filesystem-watcher debounce plus IPC plus a re-render, so the old gate blanked the just-finished reply and reflowed it back in). `nativeChatOverlayLeadsTranscriptContent` (native-chat-streaming.ts) is the content-only comparison the RPC overlay now uses directly; `working` stays the D5 status/Stop signal only |
+| `a14b816f8` | **Wave 6.** W6-2: re-scopes RPC ownership (Decision 1) from the Chat-view mount to the pane's life. `use-omp-rpc-chat-session.ts` becomes `use-omp-rpc-chat-pane-ownership.ts`, mounted once in `TerminalPane` (which already stays mounted through the Chat-view unmount for the handback listener) instead of inside the (un)mountable `NativeChatView`. It composes the Decision-2 identity resolver on the same lifecycle and publishes status/turnState into a new `ompRpcChatOwnershipByPaneKey` store slice (mirrors `agentStatusByPaneKey`); `NativeChatView`/`use-native-chat-omp-rpc-integration.ts` becomes a pure remountable subscriber — `send`/`abort`/`respondExtensionUi` are now paneKey-scoped store actions, not hook-instance callbacks. Every prior guard (F9 latch, F5 generation/StrictMode, cancelled-before-acquired, bounded conflict retry, suppressPtyExit-before-kill left armed, `allowAbort` false, D1 fail-closed degrade) carries over unchanged; release now fires only on identity rebind, pane/tab close, or app quit — never a bare Terminal<->Chat toggle |
 
 Note: commits are listed in dependency order, not `git log` order.
 
@@ -97,6 +99,20 @@ Note: commits are listed in dependency order, not `git log` order.
   no real-world example available to verify against; it is implemented per the literal
   spec and is only ever a fallback heuristic behind existence verification (see the trap
   below), so a wrong guess there degrades to "no candidate found," never a wrong write.
+- **OMP does have a history-fetch verb — Orca's typed `OmpRpcCommand` union just doesn't
+  include it yet.** `omp://rpc.md:188-193` documents `get_messages` and
+  `get_messages_page` (cursor-paginated, returning `messages`/`totalMessages`/
+  `nextCursor`, with machine-readable `session_busy` and `stale_cursor` error codes). A
+  third-lab review (wave 6) asserted otherwise and concluded replace was therefore not a
+  coherent alternative to overlay; that specific premise was wrong, but the overlay
+  decision still stands, on better grounds: (a) D1 requires the transcript reader to stay
+  alive regardless, so replace would *add* a history source rather than remove one; (b)
+  `get_messages_page` explicitly refuses to page while the session is streaming or
+  compacting, so it cannot serve live rendering precisely when the UI needs it most; (c)
+  overlay bounds the id-less reconciliation (D4) to one in-flight turn instead of forever.
+  `get_messages_page` is the likely mechanism for the deferred SSH/remote item (open item
+  6) — a remote pane has no local transcript to overlay onto, which is exactly why the
+  feature is local-only gated today. Not implemented this wave.
 
 ## Design decisions
 
@@ -131,7 +147,7 @@ Note: commits are listed in dependency order, not `git log` order.
   is therefore the *claim identity*, and the session-file path used for `switch_session` is
   resolved from it at the IPC boundary. Do not pass the id to `switch_session`; see the
   live-probed fact above for why that fails silently.
-- **Decision 1 (wave 4, amended wave 5) — kill-and-resume on first chat use.**
+- **Decision 1 (wave 4, amended wave 5, mount-anchor fixed wave 6) — kill-and-resume on first chat use.**
   Chat-view activation for an OMP pane acquires the session by killing the pane's
   PTY (`pty.kill(ptyId, {keepHistory:true})`, single-PTY granularity, best-effort
   — the registry's existing liveness/exit-proof gate is the real proof) and
@@ -180,6 +196,29 @@ Note: commits are listed in dependency order, not `git log` order.
   durable retry-until-settled loop (mirroring the old effect's indefinite
   poll, just hosted where it can survive the unmount) is future work if that
   window proves too disruptive in UAT.
+  **Wave 6 amendment — the "pane's life" claim above was aspirational, not
+  actual, until this wave.** A third-lab architecture review found the
+  acquire/hold hook (`use-omp-rpc-chat-session.ts`) was mounted inside
+  `NativeChatView`, which mounts only while Chat view is showing — so every
+  ordinary Terminal<->Chat toggle unmounted it, releasing (dispose, prove
+  exit, respawn a PTY) and re-acquiring (kill, spawn) on the very next
+  toggle back, up to ~15s of bounded waits plus omp cold-start for a toggle
+  that is instant today. The hook (renamed
+  `use-omp-rpc-chat-pane-ownership.ts`) now mounts once in `TerminalPane`
+  instead — the surface wave 5's hand-back listener already lives on for
+  exactly this reason — and publishes status/turnState into a
+  paneKey-scoped store slice (`ompRpcChatOwnershipByPaneKey`) rather than
+  returning React state, since the component that owns this lifecycle is no
+  longer the component that renders it; `NativeChatView` is now a pure
+  remountable subscriber (`use-native-chat-omp-rpc-integration.ts`). Every
+  guard above (F9 latch, F5 generation/StrictMode, cancelled-before-acquired,
+  bounded conflict retry, `suppressPtyExit`-before-kill left armed,
+  `allowAbort` false, D1 fail-closed degrade) carries over unchanged onto the
+  new lifecycle — only the mount point moved. Release fires only on a
+  genuine identity rebind, pane/tab close, or app quit, never a bare view
+  toggle. `use-omp-rpc-chat-handback-listener.ts` is unaffected: it was
+  already anchored at `TerminalPane`, subscribed once regardless of which
+  hook drives acquisition above it.
 - **Decision 2 (wave 4, hardened wave 5) — bypass the broken hook, resolve from OMP's own on-disk
   state.** Rather than wait on open item 2's hook-delivery fix, the pane's OMP session
   identity is resolved directly from `~/.omp/agent/terminal-sessions/<terminal-id>`
@@ -240,6 +279,14 @@ Note: commits are listed in dependency order, not `git log` order.
    (terminal-id-from-tty-path, the cwd-bucket encoding's `--<encoded-absolute>--` branch)
    are similarly unverified against a real OMP process — see the "Verified live facts"
    caveats above.
+   Wave 6 additionally fixed two real defects a third-lab architecture
+   review found that five waves and two implementation reviews missed: the
+   turn-completion flicker (overlay gated on the binary `working` flag
+   instead of transcript content coverage) and RPC ownership actually being
+   scoped to the Chat-view mount rather than the pane's life as Decision 1
+   always intended — see Decision 1's wave-6 amendment above. Per this
+   wave's own working rules, live UAT against a real OMP pane was still not
+   attempted; it remains explicitly the next wave's job.
 2. **Hook delivery to the renderer for OMP panes** — still broken end to end. No longer
    blocks item 1's acquisition path (Decision 2 bypassed it), but still blocks the
    *transcript-reading* path for a PTY-hosted (non-RPC-owned) OMP pane: `sessionFile`/
@@ -311,44 +358,52 @@ Note: commits are listed in dependency order, not `git log` order.
 
 ## Verification baseline
 
-Full sweep after wave 5 (`ab67e6711`): `npx -y pnpm@10.24.0 tc` — exactly 9
+Full sweep after wave 6 (`a14b816f8`): `npx -y pnpm@10.24.0 tc` — exactly 9
 `tc:web` errors, all in `src/renderer/src/components/automations/**` at
-identical file:line to wave 4's baseline (upstream `cda2280d6`), zero new;
-`tc:node`/`tc:cli` clean. `check:code-quality:changed` — 0 findings across 98
-changed files (code quality, type-aware code quality, React Doctor all
+identical file:line to wave 5's baseline (upstream `cda2280d6`), zero new;
+`tc:node`/`tc:cli` clean. `check:code-quality:changed` — 0 findings across
+102 changed files (code quality, type-aware code quality, React Doctor all
 clean). `electron-vite build` clean (main + preload + renderer, exit 0).
 
-Full `npx -y pnpm@10.24.0 test` (62,575 tests): 13 failures observed in one
-full-suite run — 12 match wave 4's exact documented baseline, all pre-existing
-and unrelated, each reproduced in isolation this wave too:
+Full `npx -y pnpm@10.24.0 test` (62,579 tests): 12 failures observed —
+exactly wave 5's documented baseline, all pre-existing and unrelated (none
+touch a file this wave changed):
 - 10 in `src/renderer/src/components/automations/**` (incl.
   `automation-scoped-list-client.test.ts`), the same `hasCustomSchedule`/
   `getAutomationOwnerTarget`/`AutomationsApi.create` `ReferenceError`s from
   upstream `cda2280d6` — same root cause as the 9 `tc:web` errors.
 - 2 in `repro-13767-shell-ready-marker-lost-to-exec.test.ts` (real-subprocess
   PTY timing; imports nothing this branch touches).
-- The 13th (`updater.startup-scheduling.test.ts`, a fake-timer scheduling
-  assertion) is **not** in the documented baseline and touches code this
-  branch never does (`src/main/updater.ts`); re-run in isolation it passed
-  cleanly (10/10), confirming flake under full-suite parallel load, not a
-  regression.
 
-Zero failures in any `native-chat`/`omp-rpc`/`pty-provider`/`terminal-pane`
-file — a combined targeted sweep of those four directories plus the main
-`ipc/omp-rpc-chat.test.ts` file (527 files, 5104 tests) passed clean both
-immediately after the code changes and again after the commits' pre-commit
-`oxfmt --write` pass. New/changed wave-5 tests: 5 new
-(`use-omp-rpc-chat-handback-listener.test.ts`) + rewritten hand-back/
-suppression coverage in `use-omp-rpc-chat-session.test.ts` (29 tests, net +1
-after removing 4 `rerender`-modeled hand-back tests and adding 5 `unmount`-
-modeled ones) + 2 new + 1 rewritten in `omp-rpc-session-owner.test.ts` (10
-tests) + 1 new + fixture fix in `omp-rpc-chat-session-registry.test.ts` (16
-tests) + 4 new in `omp-terminal-session-identity.test.ts` (17 tests) + 4 new
-in `omp-rpc-chat.test.ts` (18 tests) — all passing.
+Zero failures in any `native-chat`/`store`/`terminal-pane`/`pty` file — a
+combined targeted sweep of `src/renderer/src/components/native-chat`,
+`src/renderer/src/store`, and `src/main/ipc/omp-rpc-chat.test.ts` (386
+files, 3858 tests) passed clean, and a second sweep of
+`src/renderer/src/components/terminal-pane` plus `src/main/ipc/pty` (455
+files, 4403 tests + 7 pre-existing skips) passed clean.
 
-Live evidence so far: unchanged from wave 4 — the 494-command catalog and
+W6-1: `omp-rpc-turn-reducer.test.ts` rewrites the flicker-locking assertion
+into two tests (keeps rendering past a terminal `agent_end` until the
+transcript catches up; drops once it does) plus a reasoning-path
+equivalent — 3 net new tests.
+
+W6-2: `use-omp-rpc-chat-session.ts`/`.test.ts` become
+`use-omp-rpc-chat-pane-ownership.ts`/`.test.ts` (30 tests — every guard
+from wave 5 re-verified on the new lifecycle, plus a `paneKey: null`
+eligibility case; `unmount()` now models real pane/tab close, `rerender()`
+models the ordinary visibility toggle that no longer unmounts anything).
+New `src/renderer/src/store/slices/omp-rpc-chat-pane-ownership.ts` (the
+paneKey-scoped publication slice, registered in `store/index.ts`,
+`store/types.ts`, `store/slices/store-test-helpers.ts`).
+`use-native-chat-omp-rpc-integration.ts`/`.test.ts` rewritten as a pure
+store subscriber, with a new regression test asserting mount/rerender/
+unmount perform zero RPC IPC. `NativeChatView.tsx` and `TerminalPane.tsx`
+updated for the new call sites — `use-omp-rpc-chat-handback-listener.ts`
+is unchanged (already anchored at `TerminalPane`).
+
+Live evidence so far: unchanged from wave 5 — the 494-command catalog and
 `/usage` render correctly in the dev app (wave 1); wave 3's F12 probe
-live-verified `switch_session` path-vs-id semantics. Everything wave 4 and 5
+live-verified `switch_session` path-vs-id semantics. Everything wave 4-6
 added, including every fix in this wave, rests on unit tests against real
 temp-fs fixtures and a real (non-mocked) Zustand store — never a real OMP
 process. **The streaming-turn path, the kill-and-resume acquire trigger, and
