@@ -38,6 +38,8 @@ This document records only decisions and live-probe facts that code does not car
 | `c22913b1a` | **Wave 2.** `NativeChatExtensionUiCard.tsx` — select/confirm/input/editor rendering for `extension_ui_request` (D7) |
 | `9e2af8bb7` | **Wave 2.** `use-omp-rpc-chat-send.ts` + composer wiring — chat prompts route through the RPC session before the PTY fallback (D6); "Follow up" affordance |
 | `ca83db743` | **Wave 2.** `NativeChatView.tsx` wiring — RPC overlay spliced into the message list, D5 status override, extension-UI card swap, Stop routed through `abort()` |
+| `fcb5180aa` | **Wave 3.** Repairs 12 defects found by two independent adversarial reviews (same-lab Opus 5 + cross-lab GPT-5.6), each with a regression test. Two were critical: (a) `parseOmpRpcMessageUpdateFrame` faulted on the documented user-echo `message_update` (no `assistantMessageEvent`), latching `hasProtocolFault` and killing the session on the *first* prompt; (b) `isOmpRpcTurnActive` was content-derived, so it stayed true after every completed turn — permanent Stop button and a jammed suppression reset. Also: `exit`/`protocol-fault` now degrade the pane to PTY (D1) instead of no-oping behind a false comment; `disposeAll` disposes clients and releases claims so app-quit cannot orphan a second writer (D2); acquire/release serialized per pane with generation-guarded stores and a bounded `conflict` retry (fixes the 15s-release window and the StrictMode double-mount); extension-UI cards always offer cancel and never promote an option-less `select` (D7); fail-closed IPC rejection handling; per-block overlay gating keyed by `toolCallId` (D4); overlay text/tool-output/block-count caps; dead resume-launch fields dropped |
+| `7c5d76fa0` | **Wave 3.** Mocks the `omp-rpc-chat` registrar in `register-core-handlers.test.ts` — wave 1 added `registerOmpRpcChatHandlers()` to `registerCoreHandlers()` but not the matching sibling mock, so the real module ran and tripped the suite's `electron` mock (absent `ipcMain`). The only genuine regression the full sweep caught |
 
 Note: commits are listed in dependency order, not `git log` order.
 
@@ -57,6 +59,14 @@ Note: commits are listed in dependency order, not `git log` order.
   `method: "select"`, a free-text prompt, and Approve/Deny options.
 - OMP has **no checkpoint verb**. Continuity is only `switch_session {sessionPath}` and
   `new_session {parentSession?}`, so checkpointing is a host-side convention.
+- **`switch_session` requires the absolute session-file path, not the bare session id**
+  (live-probed twice, omp 18.0.6, wave 3 / F12). Passing a bare id does **not** error — it
+  silently fails to switch, and only a follow-up `get_state` reveals the session never
+  changed (`sessionFile mismatch after switch`). This is the opposite of the CLI, whose
+  `--resume` *does* accept a bare id; the two mechanisms are not interchangeable and
+  conflating them was a real latent bug. Acquisition now resolves the real path via
+  `resolveSessionFilePath('omp', …)` before switching, while the bare id remains the claim
+  identity key. The env-gated probe that proves this lives in `omp-rpc-live.test.ts`.
 
 ## Design decisions
 
@@ -85,28 +95,45 @@ Note: commits are listed in dependency order, not `git log` order.
   `OmpRpcSessionOwner`'s fail-closed exit-proof gates, not from registry
   sharing with that global registry. This is why `OmpRpcChatSessionRegistry`
   is deliberately its own isolated `ClaimedAgentPtyOwnerRegistry` instance.
-- **sessionFile is a session id, not a path, for OMP.** OMP resumes by session
-  id (`agent-status-extension-source.ts`, #8962) — its hook never reports a
-  `session_file`, unlike pi/prime-agent. `use-omp-rpc-chat-session.ts` passes
-  the pane's resolved `sessionId` as the contract's `sessionFile` argument.
+- **The pane's OMP identity is a session id; the RPC wire needs a path.** OMP's hook
+  reports only a `session_id`, never a `session_file` (`agent-status-extension-source.ts`,
+  #8962), unlike pi/prime-agent — so `transcriptPath` is always null for omp panes. The id
+  is therefore the *claim identity*, and the session-file path used for `switch_session` is
+  resolved from it at the IPC boundary. Do not pass the id to `switch_session`; see the
+  live-probed fact above for why that fails silently.
 
 ## Open work, in recommended order
 
-1. ~~Streaming turns over RPC~~ — **shipped (waves 1-2).** `prompt`/`steer`/
-   `follow_up`/`abort`, message/tool/turn frames, and `extension_ui_request`
-   are wired end-to-end into `NativeChat`: acquire/subscribe/release
-   lifecycle, overlay rendering, D5 status override, composer send routing,
-   the Follow up affordance, and the extension-UI card.
-   **Handoff trigger — the one thing still gating it live.** `acquire()`
-   only succeeds when the pane's PTY has *already exited* (it refuses,
-   correctly, to kill a live PTY — see D2 above). Whether chat-view
-   activation should kill-and-resume a live PTY is a product decision the
-   user is making separately; wave 2 built the entire feature against the
-   existing `OmpRpcChatAcquireResult` contract unchanged, so only the
-   acquisition call site will need to change when that decision lands — no
-   rework in the renderer. Until then, RPC engages only for panes whose PTY
-   already exited on its own (e.g. a resumed/sleeping session), not a
-   normal live "New tab -> OMP" pane.
+1. ~~Streaming turns over RPC~~ — **built (waves 1-2), defects repaired (wave 3),
+   not yet live-exercised.** `prompt`/`steer`/`follow_up`/`abort`, message/tool/turn
+   frames, and `extension_ui_request` are wired end-to-end into `NativeChat`:
+   acquire/subscribe/release lifecycle, overlay rendering, D5 status override,
+   composer send routing, the Follow up affordance, and the extension-UI card.
+   Two adversarial reviews then found 12 defects (2 critical, 6 high) — all fixed
+   in `fcb5180aa` with a regression test each. **Every invariant D1-D7 now has at
+   least one test that fails if it regresses.**
+   Read this honestly: the feature is *tested*, not *proven in a live app*. No
+   end-to-end run against a real OMP pane has happened yet, because both gates
+   below block acquisition. The wave-1/2 experience is the argument for doing
+   that UAT before trusting any of it: the critical `message_update` defect
+   would have killed the session on the very first real prompt, and no amount
+   of fake-child testing surfaced it — only a live probe did.
+   **Two gates block a live run today.** Neither is a code defect; both are
+   tracked below and in item 2.
+   (a) *Handoff trigger.* `acquire()` only succeeds when the pane's PTY has
+   already exited — it refuses, correctly, to kill a live PTY (see D2). Whether
+   chat-view activation should kill-and-resume a live PTY is an open product
+   decision. The verified primitives for it, if taken: `pty.kill(ptyId,
+   {keepHistory:true})` at single-PTY granularity plus the existing resume-launch
+   builder (`getAgentResumeArgv`/`buildAgentResumeLaunchCommand`) that
+   `omp-rpc-session-owner.ts` already uses. The whole-worktree sleep machinery
+   (`runSleepWorktrees`) is *not* reusable — it kills every PTY in the worktree
+   and resumes into a new tab, not the original pane.
+   (b) *No session id to acquire with.* Acquisition is gated on the pane's
+   resolved `sessionId`, which arrives only via the hook chain that item 2 says
+   is broken. So even a PTY-exited pane cannot currently be acquired. Item 2 is
+   therefore a hard **prerequisite** for item 1's live exercise — the earlier
+   note claiming item 1 "subsumes" item 2 was wrong and is retracted.
 2. **Hook delivery to the renderer for OMP panes** — still broken end to end
    (unrelated to the handoff trigger above, and a second reason RPC rarely
    engages today: `sessionFile`/`sessionId` is what gates acquisition, and
@@ -153,16 +180,29 @@ Note: commits are listed in dependency order, not `git log` order.
 
 ## Verification baseline
 
-Full sweep after wave 2 (`ca83db743`): 62,238 tests passing / 255 skipped, 13
-failing — all 13 pre-existing in `src/renderer/src/components/automations/**`
-(broken by upstream `cda2280d6`; same `hasCustomSchedule`/
-`getAutomationOwnerTarget`/`AutomationsApi.create` breaks `tc:web` reports).
-Zero failures in any `native-chat`/`omp-rpc` file. `tc:node` and `tc:cli`
-clean; `tc:web` clean apart from the same 9 pre-existing `automations/**`
-errors. (Earlier baseline of 11,626/83 predates unrelated test growth
-elsewhere in the tree; re-measure from this note going forward, not that
-figure.) Live: 494-command catalog and `/usage` rendering correctly in the
-dev app (wave 1). Wave 2 shipped without a fresh live OMP probe per its
-brief — the fake child (`fake-omp-rpc-child.ts`) covers the frames, and the
-one live-gating fact this wave needed (D2's PTY-claim isolation) was
-verified by reading the runtime code paths, not a live run.
+Full sweep after wave 3 (`7c5d76fa0`): 6,729 test files / 62,528 tests. `tc:node`
+and `tc:cli` clean; `tc:web` clean apart from the 9 pre-existing `automations/**`
+errors; `electron-vite build` clean; `check:code-quality:changed` reports 0
+findings across 87 changed files.
+
+Sweep failures split into three buckets — **check the bucket before blaming a
+change**:
+- 11 pre-existing in `src/renderer/src/components/automations/**`, broken by
+  upstream `cda2280d6` (`hasCustomSchedule`, `getAutomationOwnerTarget`,
+  `AutomationsApi.create`). Same root cause as the 9 `tc:web` errors.
+- 2 load-sensitive and unrelated: `ai-vault-session-worktree-map.test.tsx` (a p95
+  perf assertion — passes in isolation) and
+  `repro-13767-shell-ready-marker-lost-to-exec.test.ts` (spawns real subprocesses,
+  14s timeout; imports nothing this branch touches). Both fail more readily when
+  the suite shares CPU with a concurrent build. Do not attribute these to
+  omp-rpc work without first running them alone.
+- 1 genuine regression, fixed in `7c5d76fa0` — see the shipped table.
+
+Zero failures in any `native-chat`/`omp-rpc` file. (An earlier baseline of
+11,626/83 predates unrelated test growth elsewhere in the tree; measure from this
+note, not that figure.)
+
+Live evidence so far: the 494-command catalog and `/usage` render correctly in the
+dev app (wave 1); wave 3's F12 probe live-verified `switch_session` path-vs-id
+semantics. Everything else rests on the scripted fake child. **The streaming-turn
+path has never run against a real OMP pane** — see open item 1.
