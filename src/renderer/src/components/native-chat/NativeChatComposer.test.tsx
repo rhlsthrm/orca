@@ -19,6 +19,11 @@ const mocks = vi.hoisted(() => ({
     onCompositionEnd?: (event: { currentTarget: HTMLTextAreaElement }) => void
     sessionOptionsSurface?: SessionOptionsSurface | null
     sessionOptionsSnapshot?: SessionOptionDescriptor[]
+    disabled?: boolean
+    hasSendRoute?: boolean
+    sendButtonDisabled?: boolean
+    attachDisabled?: boolean
+    notice?: string | null
   } | null,
   modelSwitchOutcome: 'applied' as 'applied' | 'rejected' | 'interaction-required' | 'unknown',
   confirmationObserver: null as {
@@ -634,5 +639,144 @@ describe('NativeChatComposer', () => {
     )
     expect(mocks.sendNativeChatMessageVerified).not.toHaveBeenCalled()
     expect(onSwitchToTerminal).toHaveBeenCalledOnce()
+  })
+
+  describe('RPC-owned pane with no PTY (wave 8, D1)', () => {
+    it('enables typing and the send button — a successful RPC acquisition must not disable the composer', () => {
+      render(
+        <NativeChatComposer
+          terminalTabId="tab-1"
+          paneKey="tab-1:leaf-1"
+          targetPtyId={null}
+          agent="codex"
+          ompRpcChat={{
+            isOwned: true,
+            isTurnWorking: false,
+            send: vi.fn().mockResolvedValue({ ok: true })
+          }}
+        />
+      )
+
+      expect(mocks.fieldProps?.disabled).toBe(false)
+      expect(mocks.fieldProps?.hasSendRoute).toBe(true)
+      expect(mocks.fieldProps?.sendButtonDisabled).toBe(false)
+    })
+
+    it('keeps the attach affordance unavailable — RPC send is text-only this milestone', () => {
+      render(
+        <NativeChatComposer
+          terminalTabId="tab-1"
+          paneKey="tab-1:leaf-1"
+          targetPtyId={null}
+          agent="codex"
+          ompRpcChat={{ isOwned: true, isTurnWorking: false, send: vi.fn() }}
+        />
+      )
+
+      expect(mocks.fieldProps?.attachDisabled).toBe(true)
+    })
+
+    it('routes a send to the RPC session as an idle prompt', () => {
+      const send = vi.fn().mockResolvedValue({ ok: true })
+      render(
+        <NativeChatComposer
+          terminalTabId="tab-1"
+          paneKey="tab-1:leaf-1"
+          targetPtyId={null}
+          agent="codex"
+          ompRpcChat={{ isOwned: true, isTurnWorking: false, send }}
+        />
+      )
+
+      act(() => mocks.fieldProps?.onSend?.())
+
+      expect(send).toHaveBeenCalledWith({ message: 'hello', behavior: 'idle' })
+      expect(mocks.sendNativeChatMessage).not.toHaveBeenCalled()
+      expect(mocks.sendNativeChatTypedCommand).not.toHaveBeenCalled()
+    })
+
+    it('routes a send to the RPC session as a steer while an RPC turn is working (D6)', () => {
+      const send = vi.fn().mockResolvedValue({ ok: true })
+      render(
+        <NativeChatComposer
+          terminalTabId="tab-1"
+          paneKey="tab-1:leaf-1"
+          targetPtyId={null}
+          agent="codex"
+          isWorking
+          ompRpcChat={{ isOwned: true, isTurnWorking: true, send }}
+        />
+      )
+
+      act(() => mocks.fieldProps?.onSend?.())
+
+      expect(send).toHaveBeenCalledWith({ message: 'hello', behavior: 'steer' })
+    })
+
+    it('enables Stop and routes it to the caller while an RPC turn is working', () => {
+      // The abort routing itself (onStop -> ompRpc.abortChat() when
+      // ompRpc.isRpcOwned) lives in NativeChatView and is unchanged by this
+      // fix (already covered by use-native-chat-omp-rpc-integration.test.ts).
+      // What this fix adds is the button no longer being force-disabled by
+      // `!hasPty` — assert both the enablement and that the composer still
+      // calls whatever onStop it was given.
+      const onStop = vi.fn()
+      render(
+        <NativeChatComposer
+          terminalTabId="tab-1"
+          paneKey="tab-1:leaf-1"
+          targetPtyId={null}
+          agent="codex"
+          isWorking
+          onStop={onStop}
+          ompRpcChat={{ isOwned: true, isTurnWorking: true, send: vi.fn() }}
+        />
+      )
+
+      expect(mocks.fieldProps?.sendButtonDisabled).toBe(false)
+
+      act(() => mocks.fieldProps?.onStop?.())
+
+      expect(onStop).toHaveBeenCalledOnce()
+    })
+
+    it('shows a notice instead of silently dropping a PTY-only slash command', () => {
+      mocks.draft = '/model'
+      render(
+        <NativeChatComposer
+          terminalTabId="tab-1"
+          paneKey="tab-1:leaf-1"
+          targetPtyId={null}
+          agent="codex"
+          ompRpcChat={{ isOwned: true, isTurnWorking: false, send: vi.fn() }}
+        />
+      )
+
+      act(() => mocks.fieldProps?.onSend?.())
+
+      expect(mocks.sendNativeChatMessage).not.toHaveBeenCalled()
+      expect(mocks.sendNativeChatTypedCommand).not.toHaveBeenCalled()
+      expect(mocks.fieldProps?.notice).toBeTruthy()
+    })
+
+    it('stays fully disabled with the legacy copy when neither a PTY nor RPC ownership exists (no regression)', () => {
+      render(
+        <NativeChatComposer
+          terminalTabId="tab-1"
+          paneKey="tab-1:leaf-1"
+          targetPtyId={null}
+          agent="codex"
+        />
+      )
+
+      expect(mocks.fieldProps?.disabled).toBe(true)
+      expect(mocks.fieldProps?.hasSendRoute).toBe(false)
+      expect(mocks.fieldProps?.sendButtonDisabled).toBe(true)
+
+      act(() => mocks.fieldProps?.onSend?.())
+
+      expect(mocks.sendNativeChatMessage).not.toHaveBeenCalled()
+      expect(mocks.sendNativeChatTypedCommand).not.toHaveBeenCalled()
+    })
   })
 })

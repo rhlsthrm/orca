@@ -172,7 +172,21 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
       return { ptyId: targetPtyId, settings: getSettingsForAgentTabRuntimeOwner(terminalTabId) }
     }, [targetPtyId, terminalTabId])
 
-    const [hasPty, disabled] = [targetPtyId !== null, targetPtyId === null || !canSend]
+    // D1: RPC ownership of this pane is an equally valid send route as a
+    // live PTY — acquisition deliberately kills the PTY on success
+    // (killPtyBeforeOmpRpcAcquire), so requiring one here made a
+    // *successful* acquisition the thing that broke sending. Only a
+    // genuine absence of every route, or the multi-device input lock
+    // (canSend), disables typing/sending; PTY-only affordances (image
+    // attachments, PTY-routed slash commands) gate individually below on
+    // `hasPty` instead of widening this flag.
+    const hasPty = targetPtyId !== null
+    const hasSendRoute = hasPty || ompRpcChat.isOwned
+    const disabled = !hasSendRoute || !canSend
+    // Images always ride the PTY this milestone (RPC send is text-only,
+    // wave 2) — the attach affordance must read as unavailable rather than
+    // accept a click that attachResolvedPaths would only reject.
+    const attachDisabled = !hasPty || !canSend
 
     const { imageAttachments, attachResolvedPaths, clearImageAttachments, removeImageAttachment } =
       useNativeChatComposerAttachments({
@@ -185,7 +199,7 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
         setNotice
       })
     const sendButtonDisabled = isWorking
-      ? !hasPty || !onStop
+      ? !hasSendRoute || !onStop
       : disabled || (draft.trim() === '' && imageAttachments.length === 0)
 
     const { insertTypedText, focus } = useNativeChatTypedInsertion({
@@ -341,7 +355,7 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
         textareaRef={textareaRef}
         draft={draft}
         disabled={disabled}
-        hasPty={hasPty}
+        hasSendRoute={hasSendRoute}
         canSend={canSend}
         autocomplete={autocomplete}
         activeSuggestion={activeSuggestion}
@@ -349,7 +363,7 @@ export const NativeChatComposer = forwardRef<NativeChatComposerHandle, NativeCha
         imageAttachments={imageAttachments}
         sendButtonDisabled={sendButtonDisabled}
         isWorking={isWorking}
-        attachDisabled={disabled}
+        attachDisabled={attachDisabled}
         dictationDisabled={dictationDisabled}
         isDictating={isDictating}
         isDictationHoldMode={isDictationHoldMode}

@@ -23,7 +23,9 @@ export type NativeChatComposerFieldProps = {
   textareaRef: RefObject<HTMLTextAreaElement | null>
   draft: string
   disabled: boolean
-  hasPty: boolean
+  /** Any live route the composer can send through — a PTY, RPC ownership,
+   *  or both. Only its absence flips the placeholder to "no terminal". */
+  hasSendRoute: boolean
   canSend: boolean
   autocomplete: ComposerAutocomplete
   activeSuggestion: number
@@ -66,7 +68,7 @@ export function NativeChatComposerField({
   textareaRef,
   draft,
   disabled,
-  hasPty,
+  hasSendRoute,
   canSend,
   autocomplete,
   activeSuggestion,
@@ -187,7 +189,7 @@ export function NativeChatComposerField({
                   ? `${pickerListboxId}-option-${Math.min(activeSuggestion, autocomplete.items.length - 1)}`
                   : undefined
               }
-              placeholder={nativeChatComposerPlaceholder(hasPty, canSend)}
+              placeholder={nativeChatComposerPlaceholder(hasSendRoute, canSend)}
               // Why: coarse-pointer min-height follows the app's touch target convention.
               // field-sizing:content grows the field with the draft; the 8lh cap (plus
               // py-1) turns further growth into internal scrolling, and scrollbar-sleek

@@ -32,7 +32,7 @@ function renderField(draft: string): HTMLTextAreaElement {
       textareaRef={createRef<HTMLTextAreaElement>()}
       draft={draft}
       disabled={false}
-      hasPty
+      hasSendRoute
       canSend
       autocomplete={{ mode: 'none' }}
       activeSuggestion={0}
