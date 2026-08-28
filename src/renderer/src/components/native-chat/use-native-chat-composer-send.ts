@@ -4,6 +4,7 @@
 // RPC-chat routing branch (W2-4) — no behavior change to the moved code.
 
 import { useCallback } from 'react'
+import { translate } from '@/i18n/i18n'
 import { useAppStore } from '../../store'
 import type { AgentType } from '../../../../shared/agent-status-types'
 import {
@@ -96,13 +97,12 @@ export function useNativeChatComposerSend(args: UseNativeChatComposerSendArgs): 
     if (isDispatchingSessionOption) {
       return
     }
-    const target = resolveTarget()
-    if (!target) {
-      return
-    }
     // Why: `/usage` is a LOCAL command — running it over RPC returns its output
     // to render here instead of leaving it only on the TUI screen. Every other
-    // command (and a failed probe) keeps the PTY path below untouched.
+    // command (and a failed probe) keeps the PTY path below untouched. Tried
+    // before resolving a PTY target: the RPC probe needs no live terminal (D1)
+    // — an RPC-owned pane's PTY was killed on acquire, and this must not be
+    // the thing that makes a *successful* acquisition break sending.
     if (sendOmpLocalCommand(text)) {
       setHistory((prev) => pushHistory(prev, text))
       setDraft('')
@@ -114,7 +114,9 @@ export function useNativeChatComposerSend(args: UseNativeChatComposerSendArgs): 
     const classification = classifySend(text)
     // Why: route a plain chat prompt through the RPC session that owns this
     // pane before any PTY fallback (D1/D6); text-only, since there is no RPC
-    // image UI this wave — an attachment always keeps the PTY path.
+    // image UI this wave — an attachment always keeps the PTY path. Tried
+    // before resolving a PTY target for the same reason as the local command
+    // above — this is the route an RPC-owned, PTY-less pane actually sends on.
     if (classification === 'chat' && imagePaths.length === 0 && sendOmpRpcChat(text)) {
       emitNativeChatMessageSent({ agent, runtime: 'local' })
       setHistory((prev) => pushHistory(prev, text))
@@ -124,6 +126,31 @@ export function useNativeChatComposerSend(args: UseNativeChatComposerSendArgs): 
       clearImageAttachments()
       setNotice(null)
       useAppStore.getState().clearNativeChatLaunchDraft(terminalTabId)
+      return
+    }
+    const target = resolveTarget()
+    if (!target) {
+      // Nothing above claimed the draft, and there is no PTY to fall back
+      // into — an RPC-owned pane's PTY is gone by design (D1). What's left
+      // is a PTY-only affordance the RPC route can't carry this milestone:
+      // an image attachment (RPC send is text-only), or a slash command
+      // outside the RPC local-command allowlist (widening it is open item
+      // 4). Say so instead of silently doing nothing.
+      if (imagePaths.length > 0) {
+        setNotice(
+          translate(
+            'components.native-chat.composer.imagesRequirePty',
+            'Image attachments need a live terminal; remove them to send this as a chat message.'
+          )
+        )
+      } else if (classification !== 'chat') {
+        setNotice(
+          translate(
+            'components.native-chat.composer.commandRequiresPty',
+            'This command needs a live terminal and cannot run over the agent connection.'
+          )
+        )
+      }
       return
     }
     // A parked launch draft must be cleared line-by-line before the body.

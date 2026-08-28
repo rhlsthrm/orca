@@ -1,5 +1,7 @@
 // @vitest-environment happy-dom
 
+import type { Dispatch, SetStateAction } from 'react'
+
 import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { EMPTY_HISTORY } from './native-chat-composer-state'
@@ -34,14 +36,19 @@ type OnSlashCommand = NonNullable<
   Parameters<typeof useNativeChatPickerCommandDispatch>[0]['onSlashCommand']
 >
 
-function renderDispatch(options: { agent: string; onSlashCommand: OnSlashCommand }) {
+function renderDispatch(options: {
+  agent: string
+  onSlashCommand: OnSlashCommand
+  resolveTarget?: () => { settings: Record<string, never>; ptyId: string } | null
+  setNotice?: Dispatch<SetStateAction<string | null>>
+}) {
   return renderHook(() =>
     useNativeChatPickerCommandDispatch({
       agent: options.agent,
       ompRpcCwd: '/work/a',
       disabled: false,
       isDispatchingSessionOption: false,
-      resolveTarget: () => ({ settings: {}, ptyId: 'pty-1' }),
+      resolveTarget: options.resolveTarget ?? (() => ({ settings: {}, ptyId: 'pty-1' })),
       onSlashCommand: options.onSlashCommand,
       sessionOptionsSurface: null,
       trackPendingSend: vi.fn(),
@@ -51,7 +58,7 @@ function renderDispatch(options: { agent: string; onSlashCommand: OnSlashCommand
       setActiveSuggestion: vi.fn(),
       clearSkillOrigin: vi.fn(),
       clearImageAttachments: vi.fn(),
-      setNotice: vi.fn()
+      setNotice: options.setNotice ?? vi.fn()
     })
   )
 }
@@ -123,5 +130,51 @@ describe('picker dispatch routes OMP /usage over RPC', () => {
 
     await waitFor(() => expect(sendNativeChatMessage).toHaveBeenCalledWith({}, 'pty-1', '/usage'))
     expect(onSlashCommand).toHaveBeenCalledWith('/usage')
+  })
+})
+
+describe('picker dispatch on a PTY-less pane (wave 8, D1)', () => {
+  it('still sends /usage to the RPC api with no PTY — acquisition succeeding must not disable it', async () => {
+    runLocalCommand.mockResolvedValue({
+      ok: true,
+      outputText: '```\nTokens: 120k\n```',
+      agentInvoked: false
+    })
+    const onSlashCommand = vi.fn()
+    const hook = renderDispatch({
+      agent: 'omp',
+      onSlashCommand,
+      resolveTarget: () => null
+    })
+
+    act(() => hook.result.current(commandItem('usage')))
+
+    await waitFor(() =>
+      expect(onSlashCommand).toHaveBeenCalledWith('/usage', {
+        outputText: '```\nTokens: 120k\n```',
+        agentInvoked: false
+      })
+    )
+    expect(runLocalCommand).toHaveBeenCalledWith({ cwd: '/work/a', command: '/usage' })
+    expect(sendNativeChatMessage).not.toHaveBeenCalled()
+    expect(sendNativeChatTypedCommand).not.toHaveBeenCalled()
+  })
+
+  it('shows a notice instead of silently dropping a PTY-only command when there is no PTY', () => {
+    const onSlashCommand = vi.fn()
+    const setNotice = vi.fn()
+    const hook = renderDispatch({
+      agent: 'claude',
+      onSlashCommand,
+      resolveTarget: () => null,
+      setNotice
+    })
+
+    act(() => hook.result.current(commandItem('clear')))
+
+    expect(sendNativeChatMessage).not.toHaveBeenCalled()
+    expect(sendNativeChatTypedCommand).not.toHaveBeenCalled()
+    expect(onSlashCommand).not.toHaveBeenCalled()
+    expect(setNotice).toHaveBeenCalledWith(expect.any(String))
   })
 })

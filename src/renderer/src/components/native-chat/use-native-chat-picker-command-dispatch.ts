@@ -1,4 +1,5 @@
 import { useCallback, type Dispatch, type SetStateAction } from 'react'
+import { translate } from '@/i18n/i18n'
 import type { AgentType } from '../../../../shared/agent-status-types'
 import {
   emitNativeChatMessageSent,
@@ -58,12 +59,13 @@ export function useNativeChatPickerCommandDispatch(args: {
   return useCallback(
     (command) => {
       const text = `/${command.name}`
-      const target = resolveTarget()
-      if (!target || disabled || isDispatchingSessionOption) {
+      if (disabled || isDispatchingSessionOption) {
         return
       }
-      // Why: picking `/usage` from the menu must behave exactly like typing it —
-      // same RPC route, same rendered output, same PTY fallback.
+      // Why: picking `/usage` from the menu must behave exactly like typing it
+      // — same RPC route, same rendered output, same PTY fallback. Checked
+      // before resolving a PTY target: the RPC probe needs no live terminal
+      // (D1), and an RPC-owned pane's PTY is killed on acquire.
       if (shouldRouteOmpLocalCommand(agent, text)) {
         void runOmpLocalCommand(ompRpcCwd, text).then((outcome) => {
           if (outcome) {
@@ -86,6 +88,19 @@ export function useNativeChatPickerCommandDispatch(args: {
         setActiveSuggestion(0)
         clearSkillOrigin()
         setNotice(null)
+        return
+      }
+      const target = resolveTarget()
+      if (!target) {
+        // Every other catalog command is PTY-routed; the RPC local-command
+        // allowlist is `/usage`-only (widening it is open item 4). Say so
+        // instead of silently dropping the picked command.
+        setNotice(
+          translate(
+            'components.native-chat.composer.commandRequiresPty',
+            'This command needs a live terminal and cannot run over the agent connection.'
+          )
+        )
         return
       }
       trackPendingSend(
