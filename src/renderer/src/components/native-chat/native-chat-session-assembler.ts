@@ -102,7 +102,13 @@ function messageSortRank(message: NativeChatMessage): number {
 
 // Why: null timestamps (sources that can't supply one, e.g. scrape segments)
 // sort before any real timestamp within their tier so they don't jump to the
-// end. Ties break on id for a stable, deterministic order.
+// end. Ties break on id for a stable, deterministic order — except the OMP
+// reasoning/assistant split (transcript-line-decoders-omp.ts), which mints the
+// reasoning row's id as `${baseId}:reasoning` sharing the assistant row's exact
+// timestamp. Plain lexicographic id compare would sort the shorter base id
+// first (`dede2b79` < `dede2b79:reasoning`), putting the reply above the
+// reasoning that produced it. Recognize that one narrow sibling shape and pin
+// the reasoning row ahead of its base before falling back to generic id order.
 export function compareMessages(a: NativeChatMessage, b: NativeChatMessage): number {
   const ar = messageSortRank(a)
   const br = messageSortRank(b)
@@ -113,6 +119,12 @@ export function compareMessages(a: NativeChatMessage, b: NativeChatMessage): num
   const bt = b.timestamp ?? Number.NEGATIVE_INFINITY
   if (at !== bt) {
     return at - bt
+  }
+  if (a.id === `${b.id}:reasoning`) {
+    return -1
+  }
+  if (b.id === `${a.id}:reasoning`) {
+    return 1
   }
   if (a.id < b.id) {
     return -1
