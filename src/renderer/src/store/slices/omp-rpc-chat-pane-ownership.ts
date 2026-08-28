@@ -44,6 +44,16 @@ export type OmpRpcChatPaneOwnershipStatus =
 export type OmpRpcChatPaneOwnershipEntry = {
   status: OmpRpcChatPaneOwnershipStatus
   turnState: OmpRpcTurnState
+  /** Bug 1 fix (wave 7): the wave-4 resolved OMP session identity (Decision
+   *  2's use-omp-pane-session-identity.ts, a bare session id), published so
+   *  the transcript-read path (NativeChatView) can use it instead of the
+   *  still-broken agent-status hook chain (open item 2), which never
+   *  delivers a `providerSession.id` for omp panes. Sticky: once resolved
+   *  for a paneKey it is never cleared just because the pane's live ptyId
+   *  later changes (e.g. RPC acquisition killing the PTY) — only a genuine
+   *  identity rebind or pane/tab close (which drops the whole ownership row
+   *  via clearOmpRpcChatPaneOwnership) replaces it. */
+  resolvedSessionId: string | null
 }
 
 const NOT_OWNED_RESULT: OmpRpcChatSendResult = {
@@ -54,6 +64,10 @@ const NOT_OWNED_RESULT: OmpRpcChatSendResult = {
 export type OmpRpcChatPaneOwnershipSlice = {
   ompRpcChatOwnershipByPaneKey: Record<string, OmpRpcChatPaneOwnershipEntry>
   setOmpRpcChatPaneStatus: (paneKey: string, status: OmpRpcChatPaneOwnershipStatus) => void
+  /** Bug 1 fix (wave 7): publishes the wave-4 resolved OMP session identity
+   *  (see OmpRpcChatPaneOwnershipEntry.resolvedSessionId) for a paneKey.
+   *  A no-op when the value is unchanged. */
+  setOmpRpcChatPaneResolvedSessionId: (paneKey: string, sessionId: string) => void
   /** Applies one turn-lifecycle action to the paneKey's turn state, creating
    *  an idle entry first if none exists yet (a frame can arrive the same
    *  tick ownership is first published). */
@@ -86,7 +100,29 @@ export const createOmpRpcChatPaneOwnershipSlice: StateCreator<
       return {
         ompRpcChatOwnershipByPaneKey: {
           ...s.ompRpcChatOwnershipByPaneKey,
-          [paneKey]: { status, turnState: current?.turnState ?? createInitialOmpRpcTurnState() }
+          [paneKey]: {
+            status,
+            turnState: current?.turnState ?? createInitialOmpRpcTurnState(),
+            resolvedSessionId: current?.resolvedSessionId ?? null
+          }
+        }
+      }
+    })
+  },
+  setOmpRpcChatPaneResolvedSessionId: (paneKey, sessionId) => {
+    set((s) => {
+      const current = s.ompRpcChatOwnershipByPaneKey[paneKey]
+      if (current?.resolvedSessionId === sessionId) {
+        return s
+      }
+      return {
+        ompRpcChatOwnershipByPaneKey: {
+          ...s.ompRpcChatOwnershipByPaneKey,
+          [paneKey]: {
+            status: current?.status ?? 'idle',
+            turnState: current?.turnState ?? createInitialOmpRpcTurnState(),
+            resolvedSessionId: sessionId
+          }
         }
       }
     })
@@ -101,7 +137,11 @@ export const createOmpRpcChatPaneOwnershipSlice: StateCreator<
       return {
         ompRpcChatOwnershipByPaneKey: {
           ...s.ompRpcChatOwnershipByPaneKey,
-          [paneKey]: { status: current?.status ?? 'idle', turnState }
+          [paneKey]: {
+            status: current?.status ?? 'idle',
+            turnState,
+            resolvedSessionId: current?.resolvedSessionId ?? null
+          }
         }
       }
     })

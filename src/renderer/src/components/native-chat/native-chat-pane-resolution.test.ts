@@ -1,7 +1,10 @@
 import { describe, it, expect } from 'vitest'
 import type { AgentStatusEntry } from '../../../../shared/agent-status-types'
 import type { TuiAgent } from '../../../../shared/tui-agent'
-import { resolveNativeChatSession } from './native-chat-pane-resolution'
+import {
+  resolveNativeChatSession,
+  resolveEffectiveNativeChatSessionId
+} from './native-chat-pane-resolution'
 
 function entry(
   overrides: Partial<AgentStatusEntry> & Pick<AgentStatusEntry, 'paneKey'>
@@ -308,5 +311,21 @@ describe('resolveNativeChatSession', () => {
         ptyId: 'pty-1'
       })
     ).toBeNull()
+  })
+})
+
+describe('resolveEffectiveNativeChatSessionId', () => {
+  it('prefers the resolved omp identity over the hook-derived sessionId', () => {
+    expect(resolveEffectiveNativeChatSessionId('hook-session', 'resolved-session')).toBe(
+      'resolved-session'
+    )
+  })
+
+  it('falls back to the hook-derived sessionId when no resolved identity exists (non-omp panes, or before ownership ever resolves)', () => {
+    expect(resolveEffectiveNativeChatSessionId('hook-session', null)).toBe('hook-session')
+  })
+
+  it('returns null when neither source has a value (Bug 1: never a stale session id)', () => {
+    expect(resolveEffectiveNativeChatSessionId(null, null)).toBeNull()
   })
 })

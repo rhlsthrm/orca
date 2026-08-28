@@ -31,6 +31,23 @@ const subscribe =
     (args: OmpRpcChatSubscribeArgs, onEvent: (event: OmpRpcClientEvent) => void) => () => void
   >()
 const ptyKill = vi.fn<(id: string, opts?: { keepHistory?: boolean }) => Promise<void>>()
+const respawnPtyForOmpRpcChatHandback = vi.hoisted(() =>
+  vi.fn<
+    (args: {
+      paneKey: string
+      replacedPtyId: string
+      cwd: string
+      sessionId: string
+    }) => Promise<{ ok: true; ptyId: string } | { ok: false; reason: string }>
+  >()
+)
+
+// Why: use-omp-rpc-chat-pane-ownership.ts calls this directly for the D1
+// restore-a-PTY fix (a failed acquire after the kill above must never leave
+// the pane with neither a live terminal nor an RPC session) — mocked so
+// these tests assert the call rather than exercising the real store/layout
+// rebind machinery covered by omp-rpc-chat-handback.test.ts.
+vi.mock('./omp-rpc-chat-handback', () => ({ respawnPtyForOmpRpcChatHandback }))
 
 import {
   isOmpRpcChatSessionEligible,
@@ -66,6 +83,7 @@ beforeEach(() => {
   release.mockResolvedValue({ released: true })
   subscribe.mockReturnValue(vi.fn())
   ptyKill.mockResolvedValue(undefined)
+  respawnPtyForOmpRpcChatHandback.mockResolvedValue({ ok: true, ptyId: 'pty-restored' })
   resolveSessionIdentity.mockResolvedValue({ sessionId: 'session-1', source: 'breadcrumb' })
   // Why: killPtyBeforeOmpRpcAcquire (Critical A) touches the real store —
   // reset it so one test's suppression/pty-binding state never leaks into
@@ -175,6 +193,62 @@ describe('useOmpRpcChatPaneOwnership', () => {
       expect(ownershipEntry()?.turnState.status).toBe('idle')
     }
   )
+
+  // D1 fix (wave 7 / Bug 1): the original "degrades to the PTY path" test
+  // above only proves the store status flips — it never proves a PTY comes
+  // back. `killPtyBeforeOmpRpcAcquire` above already killed the pane's live
+  // PTY by the time any of these reasons come back, and a bare
+  // `api.release({respawn})` is a no-op here (the registry never stored a
+  // session to release), so without this fix the pane is left with neither
+  // a live terminal nor an RPC session — exactly the "broken pane" outcome
+  // the wave-4 review warned about.
+  it.each(['live', 'unverifiable', 'conflict', 'spawn-failed', 'executable-not-found'] as const)(
+    'restores a PTY directly when acquire returns "%s" after the kill (D1: never neither terminal nor session)',
+    async (reason) => {
+      acquire.mockResolvedValue({ ok: false, reason })
+      renderHook(() => useOmpRpcChatPaneOwnership(BASE_ARGS))
+
+      await waitFor(() => expect(ownershipEntry()?.status).toBe(reason))
+      expect(ptyKill).toHaveBeenCalledWith('pty-1', { keepHistory: true })
+      expect(respawnPtyForOmpRpcChatHandback).toHaveBeenCalledWith({
+        paneKey: PANE_KEY,
+        replacedPtyId: 'pty-1',
+        cwd: '/work/a',
+        sessionId: 'session-1'
+      })
+      // Never the registry-mediated release path: nothing was ever
+      // acquired, so that call would silently no-op (released: false) and
+      // never fire the handback push the direct call above bypasses.
+      expect(release).not.toHaveBeenCalled()
+    }
+  )
+
+  it('restores a PTY when a StrictMode/rebind race cancels the pane before a delayed acquire fails', async () => {
+    const { promise, resolve: resolveAcquire } = Promise.withResolvers<OmpRpcChatAcquireResult>()
+    acquire.mockReturnValue(promise)
+    const { unmount } = renderHook(() => useOmpRpcChatPaneOwnership(BASE_ARGS))
+    await waitFor(() => expect(ptyKill).toHaveBeenCalledTimes(1))
+
+    unmount()
+    resolveAcquire({ ok: false, reason: 'spawn-failed' })
+    await waitFor(() => expect(respawnPtyForOmpRpcChatHandback).toHaveBeenCalledTimes(1))
+
+    expect(respawnPtyForOmpRpcChatHandback).toHaveBeenCalledWith({
+      paneKey: PANE_KEY,
+      replacedPtyId: 'pty-1',
+      cwd: '/work/a',
+      sessionId: 'session-1'
+    })
+  })
+
+  it('never kills or restores a PTY when identity never resolves (refuses to acquire, D1 gate)', () => {
+    resolveSessionIdentity.mockResolvedValue(null)
+    renderHook(() => useOmpRpcChatPaneOwnership(BASE_ARGS))
+
+    expect(ptyKill).not.toHaveBeenCalled()
+    expect(acquire).not.toHaveBeenCalled()
+    expect(respawnPtyForOmpRpcChatHandback).not.toHaveBeenCalled()
+  })
 
   it('never acquires for a non-omp agent, a hidden pane, a runtime-owned pane, or no chat leaf yet', () => {
     renderHook(() => useOmpRpcChatPaneOwnership({ ...BASE_ARGS, agent: 'claude' }))

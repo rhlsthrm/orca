@@ -19,7 +19,8 @@ function seedOwnership(overrides: { isOwned: boolean; turnState: OmpRpcTurnState
     ompRpcChatOwnershipByPaneKey: {
       [PANE_KEY]: {
         status: overrides.isOwned ? 'acquired' : 'live',
-        turnState: overrides.turnState
+        turnState: overrides.turnState,
+        resolvedSessionId: null
       }
     }
   })

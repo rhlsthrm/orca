@@ -49,6 +49,7 @@ import { resolveNativeChatFileLinkContext } from './native-chat-file-link'
 import { selectNativeChatRuntimeEnvironmentId } from './native-chat-runtime-owner'
 import { useNativeChatPasteBridge } from './use-native-chat-paste-bridge'
 import { useNativeChatFileLinkClick } from './use-native-chat-file-link-click'
+import { resolveEffectiveNativeChatSessionId } from './native-chat-pane-resolution'
 import type { NativeChatResolvedViewProps, NativeChatViewProps } from './native-chat-view-types'
 
 export type { NativeChatViewProps } from './native-chat-view-types'
@@ -121,10 +122,22 @@ function NativeChatResolvedView({
   const runtimeEnvironmentId = useAppStore((s) =>
     selectNativeChatRuntimeEnvironmentId(s, terminalTabId)
   )
+  // Bug 1 fix (wave 7): `sessionId` above is derived from the agent-status
+  // hook chain (resolveNativeChatSession → agentStatusEntry.providerSession),
+  // which never delivers for omp panes (open item 2) — it stays null forever,
+  // so the transcript read below would never find the pane's completed
+  // history. Prefer the wave-4 resolved identity (published once known by
+  // the TerminalPane-anchored RPC ownership hook, sticky across the pane's
+  // later ptyId churn) and fall back to the hook value otherwise, so every
+  // other agent's existing behavior is unchanged.
+  const resolvedOmpSessionId = useAppStore(
+    (s) => s.ompRpcChatOwnershipByPaneKey[paneKey]?.resolvedSessionId ?? null
+  )
+  const effectiveSessionId = resolveEffectiveNativeChatSessionId(sessionId, resolvedOmpSessionId)
   const session = useNativeChatRetainedSession({
     paneKey,
     agent,
-    sessionId,
+    sessionId: effectiveSessionId,
     transcriptPath,
     runtimeEnvironmentId,
     enabled: isVisible
@@ -208,8 +221,8 @@ function NativeChatResolvedView({
   // immediately and pruned once its real user turn lands in the transcript, so
   // the message never vanishes between send and transcript catch-up.
   const commandMarkerScope = useMemo(
-    () => ({ paneKey, agent, sessionId }),
-    [paneKey, agent, sessionId]
+    () => ({ paneKey, agent, sessionId: effectiveSessionId }),
+    [paneKey, agent, effectiveSessionId]
   )
   const pendingScope = useMemo(() => ({ paneKey, agent }), [paneKey, agent])
   const [pending, setPending] = useState<NativeChatPendingSend[]>(() =>

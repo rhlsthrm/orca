@@ -22,6 +22,7 @@ import type { OmpRpcClientEvent } from '../../../../shared/omp-rpc-protocol'
 import { parsePaneKey } from '../../../../shared/stable-pane-id'
 import { isOmpRpcCatalogAgent } from './use-omp-rpc-commands'
 import { useOmpPaneSessionIdentity } from './use-omp-pane-session-identity'
+import { respawnPtyForOmpRpcChatHandback } from './omp-rpc-chat-handback'
 
 export type UseOmpRpcChatPaneOwnershipArgs = {
   agent: AgentType | null
@@ -158,8 +159,25 @@ export function useOmpRpcChatPaneOwnership(args: UseOmpRpcChatPaneOwnershipArgs)
     isVisible
   })
   const setOmpRpcChatPaneStatus = useAppStore((s) => s.setOmpRpcChatPaneStatus)
+  const setOmpRpcChatPaneResolvedSessionId = useAppStore(
+    (s) => s.setOmpRpcChatPaneResolvedSessionId
+  )
   const dispatchOmpRpcChatTurnAction = useAppStore((s) => s.dispatchOmpRpcChatTurnAction)
   const clearOmpRpcChatPaneOwnership = useAppStore((s) => s.clearOmpRpcChatPaneOwnership)
+  // Bug 1 fix (wave 7): publish the resolved identity as soon as it is known,
+  // independent of the acquire/hold effect below. Deliberately its own
+  // effect: `sessionFile` alone as the dependency means this never re-fires
+  // (and never re-publishes) just because `eligible`/`ptyId` later flip for
+  // reasons unrelated to identity itself (e.g. RPC acquisition killing the
+  // pane's PTY) — the store setter is itself a no-op once the value already
+  // matches, so this is safe to run on every render regardless. The chat
+  // view's transcript read (NativeChatResolvedView) prefers this over the
+  // still-broken agent-status hook chain (open item 2).
+  useEffect(() => {
+    if (paneKey !== null && sessionFile !== null) {
+      setOmpRpcChatPaneResolvedSessionId(paneKey, sessionFile)
+    }
+  }, [paneKey, sessionFile, setOmpRpcChatPaneResolvedSessionId])
   // Why (F9): visibility gates the FIRST acquisition (don't spawn an RPC
   // child for a pane whose Chat view has never been opened) but must never
   // trigger release on its own afterward — toggling Chat -> Terminal and
@@ -268,8 +286,10 @@ export function useOmpRpcChatPaneOwnership(args: UseOmpRpcChatPaneOwnershipArgs)
       // case now — chat-view activation is the trigger, not a PTY that
       // happened to exit on its own). Kill it first so the unchanged
       // exit-proof gate inside acquireOnce() sees a genuinely exited PTY.
+      let killed = false
       if (!cancelled) {
         await killPtyBeforeOmpRpcAcquire(paneKey, ptyId as string)
+        killed = true
       }
       let result = await acquireOnce()
       if (!result.ok && result.reason === 'conflict' && !cancelled) {
@@ -286,6 +306,22 @@ export function useOmpRpcChatPaneOwnership(args: UseOmpRpcChatPaneOwnershipArgs)
         // Superseded by a later effect run, which owns this identity's
         // lifecycle now — never release out from under it.
         return
+      }
+      // D1 fix (wave 7): a failed acquire after the kill above must never
+      // leave the pane with neither a live terminal nor an RPC session —
+      // the exact "broken pane" outcome the wave-4 review warned about, and
+      // the UAT bug this closes. `api.release({respawn})` would no-op here:
+      // the registry never stored a session for this paneKey (acquire never
+      // reached `acquired`), so `released` comes back false and the
+      // `ompRpcChat:handback` push this pane's listener depends on never
+      // fires (release() only pushes it once a real release settles+exits —
+      // see omp-rpc-chat.ts). Call the same respawn the listener uses
+      // directly instead. Covers both the ordinary and
+      // cancelled-before-settled races identically: either way, once
+      // `killed` is true the live PTY above is already gone and only this
+      // call brings one back.
+      if (!result.ok && killed) {
+        void respawnPtyForOmpRpcChatHandback({ paneKey, ...respawnContext }).catch(() => {})
       }
       if (cancelled) {
         // The pane unmounted, went invisible-before-ever-visible, or
