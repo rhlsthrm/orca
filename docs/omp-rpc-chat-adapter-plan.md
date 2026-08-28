@@ -55,6 +55,9 @@ This document records only decisions and live-probe facts that code does not car
 | `b6627f37d` | **Wave 6.** W6-1: fixes the turn-completion flicker — `selectOmpRpcOverlayMessages` no longer gates fade-out on the binary `working` flag (a terminal `agent_end` has no debounce; the transcript path has a 150ms filesystem-watcher debounce plus IPC plus a re-render, so the old gate blanked the just-finished reply and reflowed it back in). `nativeChatOverlayLeadsTranscriptContent` (native-chat-streaming.ts) is the content-only comparison the RPC overlay now uses directly; `working` stays the D5 status/Stop signal only |
 | `a14b816f8` | **Wave 6.** W6-2: re-scopes RPC ownership (Decision 1) from the Chat-view mount to the pane's life. `use-omp-rpc-chat-session.ts` becomes `use-omp-rpc-chat-pane-ownership.ts`, mounted once in `TerminalPane` (which already stays mounted through the Chat-view unmount for the handback listener) instead of inside the (un)mountable `NativeChatView`. It composes the Decision-2 identity resolver on the same lifecycle and publishes status/turnState into a new `ompRpcChatOwnershipByPaneKey` store slice (mirrors `agentStatusByPaneKey`); `NativeChatView`/`use-native-chat-omp-rpc-integration.ts` becomes a pure remountable subscriber — `send`/`abort`/`respondExtensionUi` are now paneKey-scoped store actions, not hook-instance callbacks. Every prior guard (F9 latch, F5 generation/StrictMode, cancelled-before-acquired, bounded conflict retry, suppressPtyExit-before-kill left armed, `allowAbort` false, D1 fail-closed degrade) carries over unchanged; release now fires only on identity rebind, pane/tab close, or app quit — never a bare Terminal<->Chat toggle |
 | (wave 7) | **Wave 7.** First live UAT against a real OMP pane, and its two bugs. Bug 1 (empty pane after acquisition): `ompRpcChatOwnershipByPaneKey` gains a sticky `resolvedSessionId` (Decision 2's identity, published once known and never cleared by later ptyId churn); `NativeChatView`/`native-chat-pane-resolution.ts`'s new `resolveEffectiveNativeChatSessionId` prefers it over the still-broken hook chain (open item 2) for the transcript read and the command-marker cache scope. D1 hole closed in `use-omp-rpc-chat-pane-ownership.ts`: a failed acquire *after* the kill now calls `respawnPtyForOmpRpcChatHandback` directly (the registry-mediated `release({respawn})` path no-ops when nothing was ever acquired, so it never fires the handback push), instead of leaving the pane with neither a terminal nor a session. Bug 2a (reasoning flattened into plain text): `decodeOmpTranscriptLine` now splits a `thinking` content block into a separate `role: 'reasoning'` message ahead of the reply, matching the RPC overlay's existing role-based model; `TranscriptDecoder`/`NativeChatLineDecoder` widen to `NativeChatMessage \| NativeChatMessage[] \| null` across every read/tail/incremental/orchestration decode path, each one normalizing the split (the tail reader — the one the live chat view actually reads through — pushes a split line's messages in *reverse* order since it walks newest-line-first and reverses the whole accumulated list exactly once at the end). Bug 2b (recap): live-probed (`omp-rpc-live-recap-probe.test.ts`, `ORCA_OMP_RPC_LIVE=1`) — the recap never crosses the RPC wire across a complete real turn (18 frames, `agent-start` through `agent-end`, including an observed `advisor_cost_changed` frame); recorded as a ceiling below, not faked. Bug 2c (advisor transcript) scoped out this wave — justification in Open work item 2c below. |
+| `5a313cbaf` | **Wave 8.** Fixes the blocking bug that made the RPC chat feature unusable on its own happy path: `NativeChatComposer.tsx`'s `[hasPty, disabled] = [targetPtyId !== null, targetPtyId === null \|\| !canSend]` disabled the whole composer (textarea, send, placeholder) whenever `targetPtyId` was null — which Decision 1 acquisition *always* makes it on success, since it kills the pane's PTY. `hasSendRoute = hasPty \|\| ompRpcChat.isOwned` replaces the PTY precondition everywhere the composer decides whether it can send at all; PTY-only affordances (image attachments) get their own `attachDisabled = !hasPty \|\| !canSend` so they gate individually instead of re-disabling the whole composer. The placeholder ("No live terminal — toggle back to reconnect.") now reads on `!hasSendRoute`, not `!hasPty`, so it stops lying about an RPC-owned pane's actual state |
+| `b58ea0b8c` | **Wave 8.** A second, deeper instance of the same bug: `useNativeChatComposerSend` and `useNativeChatPickerCommandDispatch` both resolved `resolveTarget()` and returned on `!target` *before* ever trying `sendOmpLocalCommand`/`sendOmpRpcChat`, so wave 2's RPC send route was unreachable code on exactly the pane state Decision 1 produces — the `disabled` fix above made the composer's UI enabled, but every send still silently no-op'd underneath it. Reordered so the RPC-eligible attempts run first and PTY-target resolution happens only for what's left; the residual PTY-only cases (a slash command outside the `/usage` allowlist, or an image attachment — RPC send stays text-only this milestone) get a `setNotice(...)` instead of silently doing nothing |
+| `6fc050a58` | **Wave 8.** `useNativeChatComposerAttachments`'s no-PTY case had been folded into the same notice as an unsupported remote pty ("Local attachments are not available for remote sessions"), which is false for a local, RPC-owned pane with no PTY at all — split into its own honest message |
 
 Note: commits are listed in dependency order, not `git log` order.
 
@@ -418,6 +421,30 @@ Note: commits are listed in dependency order, not `git log` order.
   wrong transition is worse than no test. `rerender()` remains correct for
   transitions that genuinely happen on a persistently-mounted instance (e.g.
   F9's visibility toggle, or an identity rebind while still eligible).
+- **The happy path was the broken path, and it survived seven waves because
+  every test supplied a PTY (wave 8).** Decision 1 acquisition kills the
+  pane's live PTY on a *successful* acquire — that is the whole point of
+  the kill-and-resume design. But `NativeChatComposer.tsx`'s send-capability
+  flag was computed from `targetPtyId !== null`, so the composer disabled
+  itself (textarea, send button, and the "No live terminal — toggle back to
+  reconnect." placeholder) at exactly the moment acquisition succeeded — the
+  RPC send route wave 2 built was live code that could never run in the
+  running app. Wave 7's own live UAT hit the empty-transcript symptom one
+  layer up (Bug 1) and never reached the composer, because typing was
+  already blocked before a prompt could be sent. `useNativeChatComposerSend`
+  and `useNativeChatPickerCommandDispatch` had an independent instance of
+  the identical mistake one layer down — both resolved a PTY target and
+  bailed before ever trying the RPC send/local-command routes, so fixing
+  only the composer's `disabled` flag would have left every send silently
+  no-op'ing under a now-enabled-looking textarea. Every prior wave's tests
+  passed because every one of them constructed the composer/hooks with a
+  non-null `targetPtyId` — there was no fixture for "RPC owns this pane and
+  the PTY is gone," so nothing ever exercised the state Decision 1's own
+  design puts a pane into on success. **Lesson: when a feature's own design
+  document says a precondition (here, a live PTY) is deliberately removed on
+  the success path, every consumer of that precondition needs a test with it
+  removed — a green suite built entirely on the failure/fallback shape of a
+  flag proves nothing about its removal.**
 
 ## Verification baseline
 
