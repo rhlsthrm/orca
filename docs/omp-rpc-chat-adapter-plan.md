@@ -64,6 +64,8 @@ This document records only decisions and live-probe facts that code does not car
 | `67234f571` | **Wave 10.** `clearTerminalLayoutPanePtyId` — a new store primitive deleting a leaf's stale `terminalLayoutsByTabId[tab].ptyIdsByLeafId` entry, guarded on the id still matching so a race that already rebound the leaf is never clobbered. `clearTabPtyId` never touched this map; a leaf could keep advertising a pty id whose process was already gone |
 | `a9cca6315` | **Wave 10.** Live UAT (dev build, CDP) bug: toggling to Chat a second time after a successful hand-back left a dead pane (no PTY, no RPC child) — `use-omp-rpc-chat-pane-ownership.ts`'s restore-on-acquire-failure call (wave 7) sat AFTER the generation-supersede check, so a run whose kill genuinely happened but whose own acquire settled only after a later run had already started for the same identity skipped restoring the PTY it killed. Moved the restore attempt before that check (restoring a specific killed ptyId can never race a different generation's own kill/restore of a different one, superseded or not); retried once (`respawnPtyWithRetry`, same shared-failure-cause reasoning as F5's conflict retry); `killPtyBeforeOmpRpcAcquire` now also calls `clearTerminalLayoutPanePtyId` alongside `clearTabPtyId`. Full spawn-before-kill reordering was assessed and not implemented — `OmpRpcSessionOwner.acquire()`'s spawn is gated behind `handoffFromPty()`'s exit-proof, a hard precondition on this call site, not a reorderable choice; decoupling them needs a two-phase spawn-then-adopt IPC protocol, out of this wave's scope |
 | `969daa3d2` | **Wave 11.** Live UAT: after an acquire-failure restore, `tab.ptyId`/`ptyIdsByLeafId[leafId]` correctly showed the restored pty (wave 10 holds), yet the composer still reported "No live terminal" — `TerminalPane.tsx`'s `chatPanePtyId`/`chatOwnerPtyId` (the only source for the composer's `targetPtyId` and for `useOmpRpcChatPaneOwnership`'s `ptyId` input) read exclusively from the pane's connected `PtyTransport`, which `respawnPtyForOmpRpcChatHandback` never rebinds — a fourth one-sided pty-binding site, in the transport rather than the store. `native-chat-effective-pty-id.ts`'s `resolveEffectiveChatPanePtyId` prefers the transport's own live binding and falls back to the store's layout binding, one helper backing both call sites |
+| `b63d72f5a` | **Wave 12.** Live UAT (CDP, real reasoning turn): the reasoning overlay never retired against the transcript, so a settled turn's thinking prose rendered AFTER the answer and stayed forever, even long past `turnState.status === 'idle'`. `selectOmpRpcOverlayMessages`'s reasoning gate compared `state.reasoningText` against `nativeChatOverlayLeadsTranscriptContent`, which measures the last **assistant**-role transcript text — thinking prose never matches an assistant reply, so the compare stayed "leading" forever. New `nativeChatOverlayLeadsTranscriptReasoning` (`native-chat-streaming.ts`) compares against the transcript's own `role: 'reasoning'` row (the wave-7 decoder split) instead, scanning back from the end and stopping at the first `role: 'user'` row (the current turn's optimistic-echo boundary) so a stale reasoning row from an earlier turn is never matched |
+| `3a4778a4f` | **Wave 12.** Live UAT found a `role: 'reasoning'` row reads as an unlabeled second paragraph of assistant prose despite the border/italic de-emphasis — no affordance identifies it as reasoning. `NativeChatMessageList.tsx`'s `MessageRow` gains a quiet, non-italic 11px uppercase "Reasoning" caption above reasoning rows only, using the existing meta-label token pattern (STYLEGUIDE 11px uppercase caption, `muted-foreground`) |
 
 Note: commits are listed in dependency order, not `git log` order.
 
@@ -193,6 +195,38 @@ Note: commits are listed in dependency order, not `git log` order.
   entry above); this wave's finding is specific to the acquire-failure
   restore path. Root-caused and fixed this wave — see the Shipped table
   (`969daa3d2`).
+- **Wave 12's live UAT (CDP, real reasoning turn, Fable 5 thinking high)
+  reproduced the reasoning-overlay retirement bug directly.** On disk the
+  session recorded `[thinking]` (130 chars) before `[text]` (102 chars) —
+  correct order. The Chat UI's DOM innerText rendered the user prompt, then
+  the answer, then the thinking paragraph — order flipped, and well after
+  the turn settled (`turnState.status === 'idle'`) the overlay still held
+  `reasoningText: 130`/`assistantText: 102`. Traced to
+  `selectOmpRpcOverlayMessages` gating the reasoning overlay with the same
+  `nativeChatOverlayLeadsTranscriptContent` helper the assistant overlay
+  uses, which only ever measures the transcript's assistant prose — thinking
+  prose never matches, so `leads` stayed true forever. Root-caused and fixed
+  this wave — see the Shipped table (`b63d72f5a`).
+- **The idle recap cannot be obtained over RPC — confirmed via a dedicated
+  idle-window probe (wave 12).** A 200-second idle window held open on a
+  session-owning RPC client, after a completed turn, produced **zero**
+  frames of any kind — no `setStatus`, no `notify`, nothing. This is
+  independent confirmation of, and consistent with, wave 7's
+  complete-turn-dump finding above: OMP's recap is computed and rendered
+  entirely client-side by the TUI (`recap.enabled`/`recap.idleSeconds`,
+  driven by `ctx.showStatus` on terminal idleness) and never crosses the RPC
+  wire under any condition tested, including sustained post-turn idleness,
+  not just mid-turn activity. It cannot be obtained over RPC and MUST NOT be
+  synthesized client-side — see the Traps entry above for why.
+- **Advisor notes are durably persisted, and are definitively not the
+  source of the recap (wave 12).** `__advisor.jsonl` records each finalized
+  advisor turn as an `advise` toolCall with `arguments: { note, severity }`
+  — live-confirmed example: `{ note: 'Stay silent — the answer already
+  matches the ask.', severity: 'nit' }`. Severities are `nit`/`concern`/
+  `blocker` only — there is no `recap` severity anywhere in the advisor
+  record, ruling out the recap being a mis-surfaced advisor note. This
+  remains the real path to surfacing advisor content later (open item 2c);
+  reading `__advisor.jsonl` itself is still out of scope this wave.
 
 ## Design decisions
 
@@ -806,3 +840,43 @@ store's layout binding is what advances at each step, matching the
 already-verified wave 10 mechanics) plus the existing, unchanged composer
 tests that already prove a non-null `targetPtyId` alone enables
 `hasSendRoute` regardless of RPC ownership status.
+
+## Wave 12 verification
+
+`npx -y pnpm@10.24.0 run tc` — **0 errors, all three projects clean**.
+`npx -y pnpm@10.24.0 run check:code-quality:changed` — 0 findings (code
+quality, type-aware code quality, React Doctor all clean, 127 changed
+files).
+
+Targeted suites: `omp-rpc-turn-reducer.test.ts` (24 tests, 5 new — the
+brief's required retire/anti-flicker/ordering/zero-overlay/no-double-render
+cases) and `native-chat-streaming.test.ts` (14 tests, 4 new for
+`nativeChatOverlayLeadsTranscriptReasoning`, including the stale-prior-turn
+boundary case), both passed clean. No React lifecycle is involved in this
+wave's fix (pure reducer/comparison functions and one presentational label),
+so no `unmount()`/remount modeling was needed.
+
+`npx -y pnpm@10.24.0 test` (64,717 tests): 2 failures, both in
+`repro-13767-shell-ready-marker-lost-to-exec.test.ts` — the documented
+baseline's `repro-13767` bucket exactly (real-subprocess PTY timing,
+unrelated to this wave; passes clean in isolation). The previously
+documented "6 `browser-*.electron.test.ts`" bucket did not manifest on this
+run, same as wave 11.
+
+`npx -y pnpm@10.24.0 exec electron-vite build` — clean, exit 0.
+
+Live evidence: this wave's own live UAT (see "Verified live facts" above)
+is what found the defect — a real CDP session with a genuine reasoning
+turn, not a synthetic repro. The fix (a pure comparison function plus a
+one-line reducer change) is unit-verified only; re-running the same
+reasoning-turn live UAT against this fix is the human's next step, per the
+working rules for this wave.
+
+No deviation from the brief's prescribed fix: the root cause matched the
+brief's hypothesis exactly (the reasoning gate reused the assistant-prose
+comparison), and the required fix (compare against the transcript's
+`role: 'reasoning'` row instead) was implemented as specified, with an
+added turn-boundary safety (stop the backward scan at the first
+`role: 'user'` row) that the brief did not spell out but that D4/W6-1's
+existing precedent for the assistant channel required for parity — see the
+Shipped table (`b63d72f5a`) and its doc comment.
