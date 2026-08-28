@@ -17,10 +17,10 @@ import { emitNativeChatMessageSent } from '@/lib/native-chat-telemetry'
 import {
   sendNativeChatMessage,
   sendNativeChatTypedCommand,
-  sendNativeChatMessageWithImageAttachments,
   submitNativeChatPrompt,
   type NativeChatSendHandle
 } from './native-chat-runtime-send'
+import { sendNativeChatMessageWithImageAttachments } from './native-chat-runtime-image-send'
 import { resolveNativeChatLaunchDraftSend } from './native-chat-launch-draft-send'
 import {
   nativeChatComposerTargetIsRemote,

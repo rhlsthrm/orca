@@ -12,23 +12,27 @@
  * guarantees.
  */
 
-import { act, type ReactNode } from 'react'
+import { act, createElement, StrictMode, type ReactNode } from 'react'
 import { createRoot, type Root } from 'react-dom/client'
 import { afterEach, beforeEach, type Mock, vi } from 'vitest'
 import type { Automation, AutomationRun } from '../../../../shared/automations-types'
 import {
-  AUTOMATION_LIST_HOST_SCOPE_RUNTIME_CAPABILITY,
-  AUTOMATION_OWNER_FENCING_RUNTIME_CAPABILITY
+  AUTOMATION_LIST_HOST_SCOPE_RUNTIME_CAPABILITY as LIST_HOST_SCOPE,
+  AUTOMATION_OWNER_FENCING_RUNTIME_CAPABILITY as OWNER_FENCING,
+  AUTOMATION_CREATE_IDEMPOTENCY_RUNTIME_CAPABILITY as CREATE_IDEMPOTENCY
 } from '../../../../shared/protocol-version'
 import type { AppState } from '@/store'
+import type { AutomationHostCatalogEntry } from './automation-host-catalog-types'
 import type { AutomationHostCatalogView } from './use-automation-host-catalog'
 import type { AutomationCreateDestinationControl } from './use-automation-create-destination'
 import type { ExternalAutomationListEntry } from './external-automation-list-entries'
 import type { AutomationListRow } from './automation-list-row-identity'
+import { resetAutomationCapabilityProbes } from './automation-scoped-list-client'
 import {
   addRuntimeProject as addRuntimeProjectFixture,
   RUNTIME_REPO_ID as RUNTIME_REPO_ID_FIXTURE,
-  RUNTIME_WORKSPACE_ID as RUNTIME_WORKSPACE_ID_FIXTURE
+  RUNTIME_WORKSPACE_ID as RUNTIME_WORKSPACE_ID_FIXTURE,
+  selfScopedList
 } from './automations-page-runtime-fixtures'
 
 export const RUNTIME_REPO_ID = RUNTIME_REPO_ID_FIXTURE
@@ -69,10 +73,12 @@ export type ListPanelProps = {
   toggleAutomation: (row: AutomationListRow) => void
   requestDeleteAutomation: (row: AutomationListRow) => void
   openCreateDialog: () => void
+  canCreateAutomation: boolean
 }
 
 export type DetailPaneProps = {
   selected: Automation | null
+  selectedHostEntry: AutomationHostCatalogEntry | null
   selectedRuns: AutomationRun[]
   selectedRunsNotice: { message: string } | null
   runNow: (automation: Automation) => void
@@ -92,6 +98,7 @@ export type EditorDialogProps = {
   open: boolean
   isEditing: boolean
   createDestination?: AutomationCreateDestinationControl
+  editDestination?: AutomationCreateDestinationControl
   notice?: { message: string; recovery: string | null } | null
   onNoticeRecover?: (action: string) => void
   repos?: { id: string }[]
@@ -297,27 +304,12 @@ export const DESKTOP_SELF_OWNER = { authority: { kind: 'desktop' }, selector: { 
 
 export const RUNTIME_ID = 'gpu'
 /** A runtime that advertises both automation capabilities, so its rows carry owners. */
-const RUNTIME_CAPABILITIES = [
-  AUTOMATION_LIST_HOST_SCOPE_RUNTIME_CAPABILITY,
-  AUTOMATION_OWNER_FENCING_RUNTIME_CAPABILITY
-]
+const RUNTIME_CAPABILITIES = [LIST_HOST_SCOPE, OWNER_FENCING, CREATE_IDEMPOTENCY]
 export const RUNTIME_SELF_FILTER = {
   kind: 'host' as const,
   host: {
     authority: { kind: 'runtime' as const, environmentId: RUNTIME_ID },
     selector: { kind: 'self' as const }
-  }
-}
-
-/** The scoped-list shape every self-owned host answers with. */
-function selfScopedList(automations: Automation[]): Record<string, unknown> {
-  return {
-    automations,
-    items: automations.map((automation) => ({
-      automationId: automation.id,
-      selector: { kind: 'self' }
-    })),
-    orphanCount: 0
   }
 }
 
@@ -379,7 +371,7 @@ export function scopedList(automations: Automation[]): void {
 
 const roots: Root[] = []
 
-export async function renderPage(): Promise<{
+export async function renderPage(options?: { strict?: boolean }): Promise<{
   container: HTMLDivElement
   rerender: () => Promise<void>
 }> {
@@ -389,7 +381,12 @@ export async function renderPage(): Promise<{
   roots.push(root)
   const rerender = async (): Promise<void> => {
     await act(async () => {
-      root.render(<AutomationsPage />)
+      // Strict mounts double-invoke effects the way the dev app does, which is
+      // where a dispose-without-revive lifecycle bug becomes visible.
+      const page = options?.strict
+        ? createElement(StrictMode, null, createElement(AutomationsPage))
+        : createElement(AutomationsPage)
+      root.render(page)
     })
   }
   await rerender()
@@ -434,6 +431,8 @@ export function installAutomationsPageHarness(): void {
   beforeEach(() => {
     globalThis.IS_REACT_ACT_ENVIRONMENT = true
     vi.clearAllMocks()
+    // Confirmed capabilities are module-level and must not leak between tests.
+    resetAutomationCapabilityProbes()
     // A prior test's wholesale mockImplementation must not leak forward.
     mocks.callRuntimeRpc.mockReset()
     mocks.callRuntimeRpc.mockImplementation(answerAutomationRpc)

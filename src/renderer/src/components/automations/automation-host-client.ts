@@ -5,6 +5,7 @@ import type {
   AutomationRun,
   AutomationUpdateInput
 } from '../../../../shared/automations-types'
+import type { AutomationAuthorityRef } from '../../../../shared/automation-owner-ref'
 import { parseExecutionHostId } from '../../../../shared/execution-host'
 import type { GlobalSettings } from '../../../../shared/global-settings-types'
 
@@ -49,6 +50,14 @@ export function getAutomationTargetFromHostId(
     : { kind: 'local' }
 }
 
+export function getAutomationAuthorityTarget(
+  authority: AutomationAuthorityRef
+): AutomationHostTarget {
+  return authority.kind === 'runtime'
+    ? { kind: 'environment', environmentId: authority.environmentId }
+    : { kind: 'local' }
+}
+
 export function getAutomationListTarget(
   settings: Pick<GlobalSettings, 'activeRuntimeEnvironmentId'> | null | undefined
 ): AutomationHostTarget {
@@ -66,11 +75,8 @@ export function getAutomationOwnerTarget(
   return getAutomationTargetFromHostId(automation.runContext?.hostId)
 }
 
-export function getAutomationCreateTarget(input: AutomationCreateInput): AutomationHostTarget {
-  return getAutomationTargetFromHostId(input.runContext?.hostId)
-}
-
-function toRuntimeAutomationCreateInput(
+/** Renames the desktop input's target fields to the wire contract every authority speaks. */
+export function toRuntimeAutomationCreateInput(
   input: AutomationCreateInput
 ): RuntimeAutomationCreateInput {
   const { projectId, workspaceId, ...rest } = input
@@ -123,20 +129,6 @@ export async function listAutomationRunsForTarget(
     { timeoutMs: 15_000 }
   )
   return result.runs
-}
-
-export async function createAutomationForTarget(input: AutomationCreateInput): Promise<Automation> {
-  const target = getAutomationCreateTarget(input)
-  if (target.kind === 'local') {
-    return await window.api.automations.create(input)
-  }
-  const result = await callRuntimeRpc<{ automation: Automation }>(
-    target,
-    'automation.create',
-    toRuntimeAutomationCreateInput(input),
-    { timeoutMs: 15_000 }
-  )
-  return result.automation
 }
 
 export async function updateAutomationForTarget(

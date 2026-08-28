@@ -19,9 +19,11 @@ vi.mock('@/i18n/i18n', () => ({
 vi.mock('./native-chat-runtime-send', () => ({
   sendNativeChatMessage: (...args: unknown[]) => sendNativeChatMessage(...args),
   sendNativeChatTypedCommand: (...args: unknown[]) => sendNativeChatTypedCommand(...args),
-  sendNativeChatMessageWithImageAttachments: (...args: unknown[]) =>
-    sendNativeChatMessageWithImageAttachments(...args),
   submitNativeChatPrompt: (...args: unknown[]) => submitNativeChatPrompt(...args)
+}))
+vi.mock('./native-chat-runtime-image-send', () => ({
+  sendNativeChatMessageWithImageAttachments: (...args: unknown[]) =>
+    sendNativeChatMessageWithImageAttachments(...args)
 }))
 vi.mock('@/lib/native-chat-telemetry', () => ({
   emitNativeChatMessageSent: vi.fn()

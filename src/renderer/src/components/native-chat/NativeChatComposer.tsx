@@ -2,6 +2,7 @@ import { forwardRef, useCallback, useImperativeHandle, useMemo, useRef, useState
 import { useAppStore } from '../../store'
 import { sendRuntimePtyInput } from '@/runtime/runtime-terminal-inspection'
 import { getSettingsForAgentTabRuntimeOwner } from '@/lib/agent-paste-draft'
+
 import { getVerifiedNativeChatCommands } from '../../../../shared/native-chat-agent-profiles'
 import { useOmpRpcCommands, useOmpRpcProbeCwd } from './use-omp-rpc-commands'
 import { useOmpRpcLocalCommandSend } from './use-omp-rpc-local-command-send'
