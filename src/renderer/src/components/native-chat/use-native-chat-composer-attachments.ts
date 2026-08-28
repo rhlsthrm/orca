@@ -107,7 +107,19 @@ export function useNativeChatComposerAttachments({
   const attachResolvedPaths = useCallback(
     (paths: string[]) => {
       const target = resolveTarget()
-      if (!target || nativeChatComposerTargetIsRemote(target.ptyId)) {
+      if (!target) {
+        // PTY-only affordance: RPC send is text-only this milestone, so an
+        // RPC-owned pane whose PTY was killed on acquire (D1) can't carry an
+        // attachment either — never silently drop what the user attached.
+        setNotice(
+          translate(
+            'components.native-chat.composer.attachmentsRequirePty',
+            'Image attachments need a live terminal.'
+          )
+        )
+        return
+      }
+      if (nativeChatComposerTargetIsRemote(target.ptyId)) {
         setNotice(
           translate(
             'components.native-chat.composer.localAttachmentUnsupported',

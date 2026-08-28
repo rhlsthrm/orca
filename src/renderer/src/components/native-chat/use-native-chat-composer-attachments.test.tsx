@@ -23,44 +23,60 @@ const target: NativeChatResolvedTarget = {
   settings: { activeRuntimeEnvironmentId: null }
 }
 
+function defaultResolveTarget(): NativeChatResolvedTarget | null {
+  return target
+}
+
+type ProbeState = { api: ProbeApi; notice: string | null }
+
 function Probe({
   scopeKey,
+  resolveTarget = defaultResolveTarget,
   onReady
 }: {
   scopeKey: string
-  onReady: (api: ProbeApi) => void
+  resolveTarget?: () => NativeChatResolvedTarget | null
+  onReady: (state: ProbeState) => void
 }): React.JSX.Element {
   const [caret, setCaret] = useState(0)
   const [, setDraftValue] = useState('')
-  const [, setNotice] = useState<string | null>(null)
+  const [notice, setNotice] = useState<string | null>(null)
   const textareaRef = useRef<HTMLTextAreaElement>(null)
   const api = useNativeChatComposerAttachments({
     attachmentScopeKey: scopeKey,
     caret,
-    resolveTarget: () => target,
+    resolveTarget,
     textareaRef,
     setCaret,
     setDraft: (updater) => setDraftValue((previous) => updater(previous)),
     setNotice
   })
-  onReady(api)
+  onReady({ api, notice })
   return createElement('textarea', { ref: textareaRef })
 }
 
 async function renderProbe(
-  scopeKey: string
-): Promise<{ root: Root; latest: () => ProbeApi; rerender: (scopeKey: string) => Promise<void> }> {
+  scopeKey: string,
+  options: { resolveTarget?: () => NativeChatResolvedTarget | null } = {}
+): Promise<{
+  root: Root
+  latest: () => ProbeApi
+  latestNotice: () => string | null
+  rerender: (scopeKey: string) => Promise<void>
+}> {
   const container = document.createElement('div')
   document.body.append(container)
   // onReady fires on every render, so keep the freshest snapshot — reading a
   // single captured `api` would go stale after attach/remove triggers a render.
   let api: ProbeApi | null = null
+  let notice: string | null = null
   const root = createRoot(container)
-  const onReady = (next: ProbeApi): void => {
-    api = next
+  const onReady = (next: ProbeState): void => {
+    api = next.api
+    notice = next.notice
   }
   await act(async () => {
-    root.render(createElement(Probe, { scopeKey, onReady }))
+    root.render(createElement(Probe, { scopeKey, resolveTarget: options.resolveTarget, onReady }))
   })
   if (!api) {
     throw new Error('Probe did not render')
@@ -73,9 +89,16 @@ async function renderProbe(
       }
       return api
     },
+    latestNotice: () => notice,
     rerender: async (nextScopeKey: string) => {
       await act(async () => {
-        root.render(createElement(Probe, { scopeKey: nextScopeKey, onReady }))
+        root.render(
+          createElement(Probe, {
+            scopeKey: nextScopeKey,
+            resolveTarget: options.resolveTarget,
+            onReady
+          })
+        )
       })
     }
   }
@@ -146,6 +169,18 @@ describe('useNativeChatComposerAttachments', () => {
     expect(probe.latest().imageAttachments).toMatchObject([
       { path: '/tmp/orca-native-chat-pane-1.png' }
     ])
+    act(() => probe.root.unmount())
+  })
+
+  it('shows a notice instead of silently dropping an attachment when there is no PTY (RPC-owned pane, D1)', async () => {
+    const probe = await renderProbe('leaf-1', { resolveTarget: () => null })
+
+    await act(async () => {
+      probe.latest().attachResolvedPaths(['/tmp/orca-native-chat-no-pty.png'])
+    })
+
+    expect(probe.latest().imageAttachments).toMatchObject([])
+    expect(probe.latestNotice()).toBe('Image attachments need a live terminal.')
     act(() => probe.root.unmount())
   })
 })
