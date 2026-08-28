@@ -91,10 +91,11 @@ export class OmpRpcChatSessionRegistry {
   private readonly owner: OmpRpcSessionOwner
   private readonly sessionsByPaneKey = new Map<string, OmpRpcChatSession>()
   private readonly claimsByPaneKey = new Map<string, AgentSessionExecutionClaim>()
-  // Why (finding C, cross-lab review): exposed via `claimedSessionFilePaths()`
-  // so the identity resolver's mtime fallback (omp-terminal-session-identity.ts)
-  // can exclude a session another live pane already claimed, before a second
-  // pane sharing the same cwd bucket is ever offered it.
+  // Why (finding C, cross-lab review): exposed via
+  // `claimedSessionFilePathsExcluding()` so the identity resolver's mtime
+  // fallback (omp-terminal-session-identity.ts) can exclude a session
+  // another live pane already claimed, before a second pane sharing the
+  // same cwd bucket is ever offered it.
   private readonly sessionFilePathsByPaneKey = new Map<string, string>()
   // Why (F5): acquire/release for one paneKey must never race each other or
   // themselves — an in-flight release holds the RPC claim up to the 15s
@@ -123,12 +124,22 @@ export class OmpRpcChatSessionRegistry {
     return this.sessionsByPaneKey.get(paneKey) ?? null
   }
 
-  /** Session file paths currently claimed by a live pane (finding C) — read
-   *  by the identity resolver's mtime-fallback candidate scan so a session
-   *  another pane already owns is never offered to a second pane sharing
-   *  the same cwd bucket. */
-  claimedSessionFilePaths(): ReadonlySet<string> {
-    return new Set(this.sessionFilePathsByPaneKey.values())
+  /** Session file paths currently claimed by a live pane OTHER than
+   *  `paneKey` (finding C, hardened wave 9 Defect 2) — read by the identity
+   *  resolver's mtime-fallback candidate scan so a session another pane
+   *  already owns is never offered to a second pane sharing the same cwd
+   *  bucket, while the asking pane's own claim is never held against it
+   *  (proven live: without the exclusion, a pane re-resolving its own
+   *  identity while holding it was silently handed a different, older
+   *  session). */
+  claimedSessionFilePathsExcluding(paneKey: string): ReadonlySet<string> {
+    const claimed = new Set<string>()
+    for (const [ownerPaneKey, sessionFilePath] of this.sessionFilePathsByPaneKey) {
+      if (ownerPaneKey !== paneKey) {
+        claimed.add(sessionFilePath)
+      }
+    }
+    return claimed
   }
 
   async acquire(args: OmpRpcChatAcquireArgs): Promise<OmpRpcChatAcquireResult> {

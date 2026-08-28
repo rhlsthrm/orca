@@ -279,12 +279,20 @@ export function parseOmpSessionIdFromFilename(filePath: string): string | null {
  * Resolves the session a pane's OMP process is (or was) using, without the
  * broken hook chain. Null means "nothing to resume" — not an error: callers
  * must degrade to today's PTY behavior, never guess a path.
+ *
+ * `ptyId` is an optional accuracy input (wave 9, Defect 1): non-null
+ * unlocks the breadcrumb path (strictly more precise, since it names the
+ * exact terminal), but its absence — Decision 1's acquisition kills the
+ * pane's live PTY on success — degrades straight to the mtime fallback,
+ * never to a failed resolution.
  */
 export async function resolveOmpPaneSessionIdentity(
-  args: { ptyId: string; cwd: string },
+  args: { ptyId: string | null; cwd: string },
   options?: ResolveOmpPaneSessionIdentityOptions
 ): Promise<OmpPaneSessionIdentity | null> {
-  const fromBreadcrumb = await resolveFromBreadcrumb(args.ptyId, args.cwd, options)
+  const fromBreadcrumb = args.ptyId
+    ? await resolveFromBreadcrumb(args.ptyId, args.cwd, options)
+    : null
   if (fromBreadcrumb === 'fresh-empty') {
     return null
   }

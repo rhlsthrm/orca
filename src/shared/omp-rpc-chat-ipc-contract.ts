@@ -16,9 +16,15 @@ import type {
  *  (terminal breadcrumb, then newest-by-mtime cwd bucket) — bypasses the
  *  broken agent-status hook chain entirely (Decision 2,
  *  docs/omp-rpc-chat-adapter-plan.md). Called before `acquire`; a null
- *  result means "nothing to resume" and the caller must not acquire. */
+ *  result means "nothing to resume" and the caller must not acquire.
+ *  `ptyId` is an optional accuracy input (wave 9, Defect 1): non-null
+ *  unlocks the breadcrumb path, but its absence degrades to the mtime
+ *  fallback — never to a rejected/ineligible call. `paneKey` scopes the
+ *  mtime fallback's already-claimed exclusion set to claims held by other
+ *  panes (Defect 2): the asking pane must never be denied its own claim. */
 export type OmpRpcChatResolveSessionIdentityArgs = {
-  ptyId: string
+  paneKey: string
+  ptyId: string | null
   cwd: string
 }
 

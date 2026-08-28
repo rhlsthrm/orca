@@ -148,9 +148,10 @@ export function registerOmpRpcChatHandlers(): void {
       _event,
       args: OmpRpcChatResolveSessionIdentityArgs
     ): Promise<OmpRpcChatResolveSessionIdentityResult> => {
-      const ptyId = args?.ptyId?.trim()
+      const paneKey = args?.paneKey?.trim()
       const cwd = args?.cwd?.trim()
-      if (!ptyId || !cwd) {
+      const ptyId = args?.ptyId?.trim() || null
+      if (!paneKey || !cwd) {
         return null
       }
       // Why (finding E, cross-lab review): the mtime-fallback sub-path
@@ -159,8 +160,12 @@ export function registerOmpRpcChatHandlers(): void {
       // locality gate of its own. Today the renderer's own
       // `runtimeEnvironmentId === null` check is the only thing keeping an
       // SSH pane's remote cwd from ever reaching this handler; verify
-      // locality here too instead of trusting that gate alone.
-      if (!localPtyProvider(ptyId)) {
+      // locality here too instead of trusting that gate alone. A null
+      // `ptyId` (wave 9, Defect 1: optional accuracy input, never a
+      // precondition) has nothing to verify locality against — the
+      // renderer's own gate is the only signal available in that case,
+      // same as before this pane ever had a `ptyId` to check.
+      if (ptyId && !localPtyProvider(ptyId)) {
         return null
       }
       try {
@@ -168,7 +173,11 @@ export function registerOmpRpcChatHandlers(): void {
           { ptyId, cwd },
           {
             getSlavePath: localGetSlavePath,
-            claimedSessionFilePaths: getRegistry().claimedSessionFilePaths()
+            // Defect 2 fix: exclude only claims held by OTHER panes — the
+            // asking pane must never be denied its own claim (proven live:
+            // re-resolving while holding a claim was silently handed a
+            // different, older session).
+            claimedSessionFilePaths: getRegistry().claimedSessionFilePathsExcluding(paneKey)
           }
         )
         return resolved ? { sessionId: resolved.sessionId, source: resolved.source } : null

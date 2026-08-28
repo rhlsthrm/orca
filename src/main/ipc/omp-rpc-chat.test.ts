@@ -18,7 +18,7 @@ const {
     release: vi.fn(),
     get: vi.fn(),
     disposeAll: vi.fn(),
-    claimedSessionFilePaths: vi.fn(() => new Set<string>())
+    claimedSessionFilePathsExcluding: vi.fn(() => new Set<string>())
   }
   return {
     handle: vi.fn(),
@@ -93,22 +93,53 @@ describe('OMP RPC chat IPC handlers', () => {
     expect(appOnce).toHaveBeenCalledWith('will-quit', expect.any(Function))
   })
 
-  it('resolveSessionIdentity returns the resolved session, threading ptyId/cwd through', async () => {
+  it('resolveSessionIdentity returns the resolved session, threading paneKey/ptyId/cwd through', async () => {
     resolveOmpPaneSessionIdentity.mockResolvedValue({
       sessionId: 'session-1',
       sessionFilePath: '/sessions/session-1.jsonl',
       source: 'breadcrumb'
     })
+    registryInstance.claimedSessionFilePathsExcluding.mockReturnValue(new Set(['/other.jsonl']))
     registerOmpRpcChatHandlers()
     await expect(
-      invoke('ompRpcChat:resolveSessionIdentity', { ptyId: 'pty-1', cwd: '/work' })
+      invoke('ompRpcChat:resolveSessionIdentity', {
+        paneKey: 'tab-1:leaf-1',
+        ptyId: 'pty-1',
+        cwd: '/work'
+      })
     ).resolves.toEqual({ sessionId: 'session-1', source: 'breadcrumb' })
     expect(resolveOmpPaneSessionIdentity).toHaveBeenCalledWith(
       { ptyId: 'pty-1', cwd: '/work' },
       expect.objectContaining({
         getSlavePath: expect.any(Function),
-        claimedSessionFilePaths: expect.any(Set)
+        claimedSessionFilePaths: new Set(['/other.jsonl'])
       })
+    )
+    expect(registryInstance.claimedSessionFilePathsExcluding).toHaveBeenCalledWith('tab-1:leaf-1')
+  })
+
+  // Wave 9, Defect 1: `ptyId` is an optional accuracy input, not a
+  // precondition — Decision 1's acquisition kills the pane's live PTY on
+  // success, so a null `ptyId` must still resolve via the mtime fallback
+  // instead of being rejected the way a missing `paneKey`/`cwd` is.
+  it('resolveSessionIdentity resolves with a null ptyId, skipping the locality gate', async () => {
+    resolveOmpPaneSessionIdentity.mockResolvedValue({
+      sessionId: 'session-2',
+      sessionFilePath: '/sessions/session-2.jsonl',
+      source: 'mtime-fallback'
+    })
+    registerOmpRpcChatHandlers()
+    await expect(
+      invoke('ompRpcChat:resolveSessionIdentity', {
+        paneKey: 'tab-1:leaf-1',
+        ptyId: null,
+        cwd: '/work'
+      })
+    ).resolves.toEqual({ sessionId: 'session-2', source: 'mtime-fallback' })
+    expect(tryGetProviderForPty).not.toHaveBeenCalled()
+    expect(resolveOmpPaneSessionIdentity).toHaveBeenCalledWith(
+      { ptyId: null, cwd: '/work' },
+      expect.objectContaining({ getSlavePath: expect.any(Function) })
     )
   })
 
@@ -119,15 +150,31 @@ describe('OMP RPC chat IPC handlers', () => {
     tryGetProviderForPty.mockReturnValue(undefined)
     registerOmpRpcChatHandlers()
     await expect(
-      invoke('ompRpcChat:resolveSessionIdentity', { ptyId: 'pty-1', cwd: '/work' })
+      invoke('ompRpcChat:resolveSessionIdentity', {
+        paneKey: 'tab-1:leaf-1',
+        ptyId: 'pty-1',
+        cwd: '/work'
+      })
     ).resolves.toBeNull()
     expect(resolveOmpPaneSessionIdentity).not.toHaveBeenCalled()
   })
 
-  it('resolveSessionIdentity returns null on missing args without resolving', async () => {
+  it('resolveSessionIdentity returns null on a missing paneKey without resolving', async () => {
     registerOmpRpcChatHandlers()
     await expect(
-      invoke('ompRpcChat:resolveSessionIdentity', { ptyId: '', cwd: '/work' })
+      invoke('ompRpcChat:resolveSessionIdentity', { paneKey: '', ptyId: 'pty-1', cwd: '/work' })
+    ).resolves.toBeNull()
+    expect(resolveOmpPaneSessionIdentity).not.toHaveBeenCalled()
+  })
+
+  it('resolveSessionIdentity returns null on a missing cwd without resolving', async () => {
+    registerOmpRpcChatHandlers()
+    await expect(
+      invoke('ompRpcChat:resolveSessionIdentity', {
+        paneKey: 'tab-1:leaf-1',
+        ptyId: 'pty-1',
+        cwd: ''
+      })
     ).resolves.toBeNull()
     expect(resolveOmpPaneSessionIdentity).not.toHaveBeenCalled()
   })
@@ -136,7 +183,11 @@ describe('OMP RPC chat IPC handlers', () => {
     resolveOmpPaneSessionIdentity.mockRejectedValue(new Error('disk error'))
     registerOmpRpcChatHandlers()
     await expect(
-      invoke('ompRpcChat:resolveSessionIdentity', { ptyId: 'pty-1', cwd: '/work' })
+      invoke('ompRpcChat:resolveSessionIdentity', {
+        paneKey: 'tab-1:leaf-1',
+        ptyId: 'pty-1',
+        cwd: '/work'
+      })
     ).resolves.toBeNull()
   })
 

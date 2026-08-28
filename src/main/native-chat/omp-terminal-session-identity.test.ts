@@ -359,4 +359,29 @@ describe('resolveOmpPaneSessionIdentity', () => {
 
     expect(resolved).toBeNull()
   })
+
+  // Wave 9, Defect 1, acceptance criterion 2: `ptyId` is an optional
+  // accuracy input — a null value must resolve via the mtime fallback
+  // exactly like a ptyId whose terminal id cannot be determined, never
+  // fail closed just because no PTY is live.
+  it('resolves via the mtime fallback when ptyId is null', async () => {
+    const root = await makeRoot('orca-omp-terminal-identity-null-pty-')
+    const cwd = join(root, 'work')
+    await mkdir(cwd, { recursive: true })
+    const bucketDir = join(root, 'sessions', '-work')
+    await mkdir(bucketDir, { recursive: true })
+    const target = join(bucketDir, '2026-08-12T00-00-00-000Z_only.jsonl')
+    await writeFile(target, '{}\n')
+
+    const resolved = await resolveOmpPaneSessionIdentity(
+      { ptyId: null, cwd },
+      { agentDir: root, homeDir: root, tempDir: join(root, 'no-tmp'), getSlavePath: undefined }
+    )
+
+    expect(resolved).toEqual({
+      sessionId: 'only',
+      sessionFilePath: target,
+      source: 'mtime-fallback'
+    })
+  })
 })
