@@ -211,6 +211,11 @@ function MessageRow({
         isSystem && 'text-xs text-muted-foreground'
       )}
     >
+      {isReasoning ? (
+        <div className="mb-1 text-[11px] font-semibold not-italic uppercase tracking-[0.05em] text-muted-foreground/70">
+          {translate('components.native-chat.reasoningLabel', 'Reasoning')}
+        </div>
+      ) : null}
       {showControls ? (
         <AgentControls
           markdown={markdown}
