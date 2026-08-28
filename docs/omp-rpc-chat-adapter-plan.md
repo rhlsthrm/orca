@@ -63,6 +63,7 @@ This document records only decisions and live-probe facts that code does not car
 | `b19ee822f` | **Wave 9.** Defect 1 fix, part 3 (the actual deadlock trigger): `use-omp-rpc-chat-pane-ownership.ts` duplicated the same `ptyId!==null` gate in its own `identityEligible`/F9 latch key, so even with the identity hook fixed, the acquire/hold effect tore ownership down the moment its own kill nulled `ptyId` — acquire succeeds, PTY dies, ownership resets to `idle`, composer disabled forever (proven live). Keys eligibility on `paneKey`+`cwd`+`sessionFile`; `ptyId` is still required to start acquiring (real kill target) but a live `engagedIdentityRef` keeps eligibility once acquisition has genuinely begun, and the effect's own dependencies no longer include raw `ptyId` so it never re-fires from its own kill. Same fix applied to `isOmpRpcChatSessionEligible`, the exported pure gate |
 | `67234f571` | **Wave 10.** `clearTerminalLayoutPanePtyId` — a new store primitive deleting a leaf's stale `terminalLayoutsByTabId[tab].ptyIdsByLeafId` entry, guarded on the id still matching so a race that already rebound the leaf is never clobbered. `clearTabPtyId` never touched this map; a leaf could keep advertising a pty id whose process was already gone |
 | `a9cca6315` | **Wave 10.** Live UAT (dev build, CDP) bug: toggling to Chat a second time after a successful hand-back left a dead pane (no PTY, no RPC child) — `use-omp-rpc-chat-pane-ownership.ts`'s restore-on-acquire-failure call (wave 7) sat AFTER the generation-supersede check, so a run whose kill genuinely happened but whose own acquire settled only after a later run had already started for the same identity skipped restoring the PTY it killed. Moved the restore attempt before that check (restoring a specific killed ptyId can never race a different generation's own kill/restore of a different one, superseded or not); retried once (`respawnPtyWithRetry`, same shared-failure-cause reasoning as F5's conflict retry); `killPtyBeforeOmpRpcAcquire` now also calls `clearTerminalLayoutPanePtyId` alongside `clearTabPtyId`. Full spawn-before-kill reordering was assessed and not implemented — `OmpRpcSessionOwner.acquire()`'s spawn is gated behind `handoffFromPty()`'s exit-proof, a hard precondition on this call site, not a reorderable choice; decoupling them needs a two-phase spawn-then-adopt IPC protocol, out of this wave's scope |
+| `969daa3d2` | **Wave 11.** Live UAT: after an acquire-failure restore, `tab.ptyId`/`ptyIdsByLeafId[leafId]` correctly showed the restored pty (wave 10 holds), yet the composer still reported "No live terminal" — `TerminalPane.tsx`'s `chatPanePtyId`/`chatOwnerPtyId` (the only source for the composer's `targetPtyId` and for `useOmpRpcChatPaneOwnership`'s `ptyId` input) read exclusively from the pane's connected `PtyTransport`, which `respawnPtyForOmpRpcChatHandback` never rebinds — a fourth one-sided pty-binding site, in the transport rather than the store. `native-chat-effective-pty-id.ts`'s `resolveEffectiveChatPanePtyId` prefers the transport's own live binding and falls back to the store's layout binding, one helper backing both call sites |
 
 Note: commits are listed in dependency order, not `git log` order.
 
@@ -175,6 +176,23 @@ Note: commits are listed in dependency order, not `git log` order.
   see the Traps entry), and nothing restored the PTY: the exact "worst
   outcome" D1 exists to prevent. Root-caused and fixed this wave — see the
   Shipped table (`a9cca6315`).
+- **Wave 11's live UAT (dev build, CDP) re-tested the same two-cycle path
+  wave 10 fixed and found the PTY genuinely restored (`pty: 'live'` —
+  `tab.ptyId`/`ptyIdsByLeafId[leafId]` both correctly rebound) but the
+  composer still stuck on "No live terminal", disabled — a D1
+  degrade-contract violation wave 10's own fix did not close. Traced to a
+  fourth one-sided pty-binding site, this time not in the store at all:
+  `TerminalPane.tsx`'s `chatPanePtyId`/`chatOwnerPtyId` — the sole source
+  for the composer's `targetPtyId` and for `useOmpRpcChatPaneOwnership`'s
+  own `ptyId` input — read exclusively from the pane's connected
+  `PtyTransport` (`paneTransportsRef`), which `respawnPtyForOmpRpcChatHandback`
+  never rebinds; the transport's own exit handling genuinely nulls itself
+  when Decision 1's kill happens, and nothing ever tells it about the
+  replacement PTY the RPC hand-back/restore spawns via IPC. Confirms cycle 1
+  (acquire → stream → hand-back) is live-verified end to end (wave 10's own
+  entry above); this wave's finding is specific to the acquire-failure
+  restore path. Root-caused and fixed this wave — see the Shipped table
+  (`969daa3d2`).
 
 ## Design decisions
 
@@ -414,6 +432,19 @@ Note: commits are listed in dependency order, not `git log` order.
 7. Upstream PR against #10099, then UAT — blocked on item 1's live exercise (this wave
    closed the gates that blocked it; the run itself still has not happened) and item 2's
    hook-delivery bug for full transcript-reading parity.
+8. **`spawn-failed` on a re-acquire is undetermined, not root-caused — needs a
+   clean-machine retest (wave 11).** Both wave 10's and wave 11's live UAT
+   reproduced the RPC child failing to spawn on a second acquire, but both
+   runs had the test machine under heavy memory pressure (wave 10: ~95%
+   swap; wave 11: ~93% swap) with no spawn error surfaced in the main-process
+   logs either time. Explicitly not chased this wave (see the working rules
+   above) — do not add retries or weaken the exit-proof/single-writer gates
+   to paper over it. This wave's fix (`resolveEffectiveChatPanePtyId`) makes
+   the *outcome* of a `spawn-failed` status safe (a restored pty still gets
+   a working composer), which is orthogonal to *why* the spawn itself fails.
+   Next step: re-run the same two-cycle UAT on an otherwise-idle machine; if
+   `spawn-failed` still reproduces there, it is a genuine product defect
+   worth its own investigation, not an artifact of memory pressure.
 
 ## Traps that cost real time
 
@@ -531,6 +562,30 @@ Note: commits are listed in dependency order, not `git log` order.
   purpose, check whether that purpose is actually about ownership of
   shared state, or a private obligation (something only this run did) that
   must discharge regardless of who owns what afterward.**
+- **Standing rule (wave 11, fourth occurrence of the one-sided
+  pty-binding mistake class — wave 8 composer, wave 9 identity, wave 10
+  layout-leaf clear, this wave the transport): a pty binding has THREE
+  independent representations in this codebase, not two.** Prior waves
+  treated `tab.ptyId` and `terminalLayoutsByTabId[tab].ptyIdsByLeafId`
+  as the whole story and kept them symmetric. There is a third: the
+  pane's connected `PtyTransport` (`paneTransportsRef`), whose own
+  `getPtyId()` only ever changes through *its own* `connect()`/reattach
+  machinery (SSH reattach, daemon cold-restore, `connectPanePty`'s
+  initial bind, `handleRestartCodexPane`'s explicit destroy+reconnect) —
+  every one of those paths calls back into the transport itself when it
+  rebinds. `respawnPtyForOmpRpcChatHandback` (Decision 1's kill-and-resume
+  hand-back, and the D1 fail-closed restore on acquire failure) rebinds
+  the store pair correctly but never touches the transport, so
+  `TerminalPane.tsx`'s `chatPanePtyId`/`chatOwnerPtyId` — computed
+  *exclusively* from the transport, no store fallback — stayed null
+  forever after Decision 1's own kill even once the store showed a live
+  replacement pty. **Lesson: "the store is symmetric" is not the same
+  claim as "every consumer reads the store" — grep for `paneTransportsRef`
+  reads, not just store writes, before declaring a pty-binding fix
+  complete.** `resolveEffectiveChatPanePtyId` is now the one place that
+  reconciles transport vs. layout for chat purposes; any future Chat
+  surface that needs "is there a live pty for this pane" must call it,
+  not read `paneTransportsRef` or the store directly.
 
 ## Verification baseline
 
@@ -674,3 +729,80 @@ pre-fix code (reverting just the source change makes it fail with the
 exact "restore never called" symptom the live UAT observed), then
 confirmed passing again with the fix restored — the closest available
 substitute for a second live CDP run this wave.
+
+## Wave 11 verification
+
+`npx -y pnpm@10.24.0 tc` — **0 errors, all three projects clean**.
+`check:code-quality:changed` — 0 findings (code quality, type-aware code
+quality, React Doctor all clean, 125 changed files).
+
+Targeted suite for the new file: `native-chat-effective-pty-id.test.ts` (5
+tests, new — transport-wins, layout-fallback, both-null, undefined-layout,
+and the full acquire→hand-back→acquire-fails→restored cycle modeled purely
+through the resolver). Combined regression sweep of every touched/adjacent
+surface — `native-chat` (all files), `store`, `src/main/ipc/omp-rpc-chat.test.ts`,
+and `terminal-pane/pty-connection` — 460 files, 4614 tests, passed clean.
+
+`npx -y pnpm@10.24.0 test` (64,709 tests): 3 failures on the full parallel
+run, none in a file this wave touched. Isolation re-run attributes each:
+- 2 in `repro-13767-shell-ready-marker-lost-to-exec.test.ts` — still fail
+  in isolation (real-subprocess PTY timing), matching the documented
+  baseline exactly.
+- 1 in `managed-hook-script-refresh.test.ts` (`ENOTEMPTY` removing an
+  isolated tmp userData dir) — passes clean in isolation; the same
+  tmpdir-cleanup race under full-suite parallel load wave 10 already
+  documented, unrelated to this wave (the file has no relationship to
+  native-chat/terminal/pty code).
+
+The previously-documented "6 `browser-*.electron.test.ts`, load-sensitive"
+bucket did not manifest any failures on this run.
+
+`npx -y pnpm@10.24.0 exec electron-vite build` — clean, exit 0.
+
+Live evidence: this wave's own live UAT (see "Verified live facts" above)
+is what found the defect — a real dev-build CDP session, not a synthetic
+repro. The fix itself (a pure resolver function with no React/IPC
+surface) is unit-verified only; re-running the same two-cycle live UAT
+against this fix is the human's next step, per the working rules for this
+wave (do not attempt live UAT beyond what the brief already supplied).
+
+**Deviation from the brief's prescribed fix, flagged per the working
+rules.** The brief's root-cause hypothesis — that `killPtyBeforeOmpRpcAcquire`'s
+`clearTerminalLayoutPanePtyId` call left `ptyIdsByLeafId` empty because the
+restore path rebinds only `tab.ptyId` — does not hold against the code:
+`respawnPtyForOmpRpcChatHandback` already calls both `updateTabPtyId` *and*
+`rebindPaneLayoutLeaf` (→ `replaceTerminalLayoutPanePtyId`), and both are
+unconditional writes (no stale-match guard blocks them), verified by
+dedicated store-slice tests (`terminal-layout-pty-clear.test.ts`,
+`codex-restart-notice-lifecycle.test.ts`'s `replaceTerminalLayoutPanePtyId`
+suite) and by grepping every `updateTabPtyId` call site in the renderer for
+a paired layout rebind — none are missing one. The store's tab-record/
+layout-leaf pair is already symmetric; wave 10's fix holds exactly as
+documented. The real gap is one layer up: `TerminalPane.tsx` never reads
+that store pair for chat purposes at all — `chatPanePtyId`/`chatOwnerPtyId`
+read only the pane's connected `PtyTransport`, a third, independent
+pty-binding representation the RPC hand-back/restore path had never been
+taught to update. Implemented the closest fail-closed alternative: prefer
+the transport (the ordinary, most-authoritative source for every other pty
+lifecycle) and fall back to the store's layout binding only when the
+transport has none — see `resolveEffectiveChatPanePtyId`'s doc comment for
+the full reasoning, including why reconnecting the transport itself
+(real xterm byte-streaming) is a materially larger, separately-scoped
+change this wave's contract does not require.
+
+Two of the brief's four fix requirements do not carry over as written,
+for the same reason: "guard the rebind the same way wave 10 guarded the
+clear" assumed a new store-side write primitive; the actual fix is a pure
+read-side preference (transport-if-present, else layout), which cannot
+clobber a concurrent write — the transport, once it reconnects on its own,
+always wins again. The brief's two required regression-test shapes
+("`tab.ptyId`/`ptyIdsByLeafId[leafId]` both reference the restored pty" and
+"a full acquire→hand-back→acquire-fails→restored cycle via `unmount()`/
+remount") targeted hook/store-level tests under the original hypothesis;
+since the real fix is a pure function with no React lifecycle or store
+mutation at all, the equivalent coverage is the resolver's own full-cycle
+test above (transport stays null throughout, exactly as it does live; the
+store's layout binding is what advances at each step, matching the
+already-verified wave 10 mechanics) plus the existing, unchanged composer
+tests that already prove a non-null `targetPtyId` alone enables
+`hasSendRoute` regardless of RPC ownership status.
