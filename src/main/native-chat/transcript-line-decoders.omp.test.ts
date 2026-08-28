@@ -1,5 +1,19 @@
 import { describe, expect, it } from 'vitest'
-import { decodeOmpTranscriptLine } from './transcript-line-decoders'
+import type { NativeChatMessage } from '../../shared/native-chat-types'
+import { decodeOmpTranscriptLine as decodeOmpTranscriptLineRaw } from './transcript-line-decoders'
+
+// Why: every test below except the two reasoning-split ones expects (and
+// always has) a single decoded message — asserting that once here keeps
+// every other test's existing `decoded?.foo` assertions unchanged instead of
+// threading a narrowing check through each of them. The two split tests
+// import `decodeOmpTranscriptLineRaw` directly and handle the array case.
+function decodeOmpTranscriptLine(line: string, fallbackId: string): NativeChatMessage | null {
+  const decoded = decodeOmpTranscriptLineRaw(line, fallbackId)
+  if (Array.isArray(decoded)) {
+    throw new Error('expected a single message; use decodeOmpTranscriptLineRaw for split cases')
+  }
+  return decoded
+}
 
 const line = (record: unknown): string => JSON.stringify(record)
 
@@ -38,8 +52,8 @@ describe('decodeOmpTranscriptLine', () => {
     })
   })
 
-  it('keeps thinking and tool calls together on a mixed assistant turn', () => {
-    const decoded = decodeOmpTranscriptLine(
+  it('splits thinking into a separate reasoning message ahead of a mixed assistant turn', () => {
+    const decoded = decodeOmpTranscriptLineRaw(
       message('assistant', [
         { type: 'thinking', thinking: 'Checking the goal' },
         { type: 'text', text: 'Reading it now.' },
@@ -47,21 +61,43 @@ describe('decodeOmpTranscriptLine', () => {
       ]),
       'f'
     )
-    expect(decoded?.role).toBe('assistant')
-    expect(decoded?.blocks).toEqual([
-      { type: 'text', text: 'Checking the goal' },
-      { type: 'text', text: 'Reading it now.' },
-      { type: 'tool-call', name: 'goal', input: { op: 'get' }, toolCallId: 'call-1' }
-    ])
+    expect(Array.isArray(decoded)).toBe(true)
+    const messages = decoded as Exclude<typeof decoded, null>[]
+    expect(messages).toHaveLength(2)
+    // Reasoning must precede the reply it belongs to, and carry a distinct id
+    // so it never collides with (or double-renders alongside) the reply.
+    expect(messages[0]).toEqual({
+      id: 'rec-1:reasoning',
+      role: 'reasoning',
+      blocks: [{ type: 'text', text: 'Checking the goal' }],
+      timestamp: expect.any(Number),
+      source: 'transcript'
+    })
+    expect(messages[1]).toEqual({
+      id: 'rec-1',
+      role: 'assistant',
+      blocks: [
+        { type: 'text', text: 'Reading it now.' },
+        { type: 'tool-call', name: 'goal', input: { op: 'get' }, toolCallId: 'call-1' }
+      ],
+      timestamp: expect.any(Number),
+      source: 'transcript'
+    })
   })
 
-  it('keeps a thinking-only assistant turn on the assistant role', () => {
-    const decoded = decodeOmpTranscriptLine(
+  it('keeps a thinking-only assistant turn on the reasoning role, not assistant', () => {
+    const decoded = decodeOmpTranscriptLineRaw(
       message('assistant', [{ type: 'thinking', thinking: 'Weighing two options' }]),
       'f'
     )
-    expect(decoded?.role).toBe('assistant')
-    expect(decoded?.blocks).toEqual([{ type: 'text', text: 'Weighing two options' }])
+    // No non-reasoning content on this turn, so the decoder must return the
+    // single reasoning message directly rather than a one-element array.
+    if (decoded === null || Array.isArray(decoded)) {
+      throw new Error('expected a single reasoning message')
+    }
+    expect(decoded.id).toBe('rec-1:reasoning')
+    expect(decoded.role).toBe('reasoning')
+    expect(decoded.blocks).toEqual([{ type: 'text', text: 'Weighing two options' }])
   })
 
   it('passes tool arguments through unchanged', () => {

@@ -260,6 +260,33 @@ describe('readNativeChatTranscript (codex)', () => {
   })
 })
 
+describe('readNativeChatTranscript (omp)', () => {
+  it('splits reasoning into its own message ahead of the reply it belongs to (Bug 2a)', async () => {
+    const filePath = await writeFixture('orca-native-chat-omp-reasoning-', [
+      {
+        type: 'message',
+        id: 'rec-1',
+        timestamp: '2026-06-01T10:00:00.000Z',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Checking the goal' },
+            { type: 'text', text: 'Reading it now.' }
+          ]
+        }
+      }
+    ])
+    const result = await readNativeChatTranscript('omp', 'sess', { filePath })
+    if (!('messages' in result)) {
+      throw new Error('expected messages')
+    }
+    expect(result.messages.map((m) => [m.role, m.blocks[0]])).toEqual([
+      ['reasoning', { type: 'text', text: 'Checking the goal' }],
+      ['assistant', { type: 'text', text: 'Reading it now.' }]
+    ])
+  })
+})
+
 describe('readNativeChatTranscript (errors)', () => {
   // Why: ENOENT after a successful resolve is the same first-flush/rotation
   // race as an unresolved path (#8401) — it must stay retry-worthy.
@@ -331,5 +358,59 @@ describe('readNativeChatTranscriptTailFile', () => {
 
     expect(result.messages).toEqual([])
     expect(result.hasMore).toBe(false)
+  })
+
+  // Why: this reader walks the file newest-line-first and reverses the whole
+  // accumulated list exactly once at the end (transcript-tail-reader.ts) —
+  // this is the ONE path the live chat view actually reads through
+  // (nativeChat:readSession), so a line that splits into several messages
+  // (omp's reasoning-before-reply split, Bug 2a) must survive that reversal
+  // in the right order across multiple such lines, not just one.
+  it('preserves reasoning-before-reply order for omp across the reverse-walked tail', async () => {
+    const decode = nativeChatLineDecoderForAgent('omp')!
+    const filePath = await writeFixture('orca-native-chat-omp-tail-reasoning-', [
+      {
+        type: 'message',
+        id: 'rec-1',
+        timestamp: '2026-06-01T10:00:00.000Z',
+        message: { role: 'user', content: [{ type: 'text', text: 'go' }] }
+      },
+      {
+        type: 'message',
+        id: 'rec-2',
+        timestamp: '2026-06-01T10:00:01.000Z',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'First think' },
+            { type: 'text', text: 'First reply' }
+          ]
+        }
+      },
+      {
+        type: 'message',
+        id: 'rec-3',
+        timestamp: '2026-06-01T10:00:02.000Z',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Second think' },
+            { type: 'text', text: 'Second reply' }
+          ]
+        }
+      }
+    ])
+
+    const result = await readNativeChatTranscriptTailFile(filePath, 10, decode, true)
+
+    expect(
+      result.messages.map((m) => [m.role, m.blocks[0]?.type === 'text' ? m.blocks[0].text : null])
+    ).toEqual([
+      ['user', 'go'],
+      ['reasoning', 'First think'],
+      ['assistant', 'First reply'],
+      ['reasoning', 'Second think'],
+      ['assistant', 'Second reply']
+    ])
   })
 })

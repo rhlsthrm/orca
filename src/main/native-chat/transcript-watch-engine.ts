@@ -1,4 +1,4 @@
-import type { NativeChatMessage, NativeChatTurnLifecycle } from '../../shared/native-chat-types'
+import type { NativeChatTurnLifecycle } from '../../shared/native-chat-types'
 import {
   boundaryFingerprint,
   readTranscriptFileVersion,
@@ -11,7 +11,10 @@ import {
   type IncrementalTranscriptState
 } from './transcript-incremental-reader'
 import { createTranscriptNativeWatcher } from './transcript-native-watcher'
-import { readNativeChatTranscriptTailFile } from './transcript-tail-reader'
+import {
+  readNativeChatTranscriptTailFile,
+  type NativeChatLineDecoder
+} from './transcript-tail-reader'
 import { nativeChatTurnLifecycleDecoderForAgent } from './transcript-turn-lifecycle'
 import type {
   NativeChatTranscriptSubscription,
@@ -37,7 +40,7 @@ export function getActiveNativeChatWatcherCount(): number {
  */
 export async function installTranscriptWatcher(
   filePath: string,
-  decode: (line: string, fallbackId: string) => NativeChatMessage | null,
+  decode: NativeChatLineDecoder,
   args: SubscribeNativeChatTranscriptArgs,
   /** Cancels the install probe so an unsubscribe during it detaches the gate
    *  waiter immediately instead of at the 30s deadline. */

@@ -222,9 +222,17 @@ async function readForwardPage(
       malformedRecordCount++
       return
     }
-    const message = decode(line, transcriptFallbackId(filePath, pendingStart))
-    if (message) {
-      messages.push(message)
+    // Why: a decoder may split one line into several messages (omp's
+    // reasoning-before-reply split) — this reader walks forward, so no
+    // reversal is needed; both messages simply push in their given order.
+    const decoded = decode(line, transcriptFallbackId(filePath, pendingStart))
+    if (decoded === null) {
+      return
+    }
+    if (Array.isArray(decoded)) {
+      messages.push(...decoded)
+    } else {
+      messages.push(decoded)
     }
   }
 

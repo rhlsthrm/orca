@@ -31,7 +31,7 @@ import { toolResultOutput } from './transcript-record-blocks'
 export function decodeOmpTranscriptLine(
   line: string,
   fallbackId: string
-): NativeChatMessage | null {
+): NativeChatMessage | NativeChatMessage[] | null {
   const record = parseJsonObject(line)
   if (!record || (record.type !== 'message' && record.type !== 'custom_message')) {
     return null
@@ -110,8 +110,18 @@ export function decodeOmpTranscriptLine(
   if ((role === 'custom' || role === 'hookMessage') && message.display !== true) {
     return null
   }
-  const blocks = ompContentBlocks(message.content)
-  if (blocks.length === 0) {
+  // Bug 2a (wave 7): omp's `thinking` content blocks used to flatten into the
+  // same message's `blocks` as ordinary text, rendering reasoning as plain
+  // assistant prose — visually indistinguishable from the reply, and
+  // inconsistent with the RPC overlay path, which already models reasoning as
+  // its own `role: 'reasoning'` message (omp-rpc-turn-reducer.ts). Split the
+  // content array into a reasoning bucket and everything else instead, so a
+  // mixed thinking+reply turn becomes two messages (reasoning first) and a
+  // thinking-only turn becomes a reasoning message rather than an assistant
+  // one. The reasoning message keeps a suffixed, still-stable id so it never
+  // collides with the primary message's own (unchanged) id.
+  const { reasoningBlocks, blocks } = ompSplitReasoningContent(message.content)
+  if (blocks.length === 0 && reasoningBlocks.length === 0) {
     // Why: omp stamps an aborted turn onto the assistant message itself
     // (`stopReason: 'aborted'`), and when nothing streamed before the abort the
     // content is empty — so the turn would silently vanish. Surface it as the
@@ -127,7 +137,20 @@ export function decodeOmpTranscriptLine(
       : null
   }
   const messageRole = role === 'assistant' ? 'assistant' : role === 'user' ? 'user' : 'system'
-  return { id, role: messageRole, blocks, timestamp, source: 'transcript' }
+  const messages: NativeChatMessage[] = []
+  if (reasoningBlocks.length > 0) {
+    messages.push({
+      id: `${id}:reasoning`,
+      role: 'reasoning',
+      blocks: reasoningBlocks,
+      timestamp,
+      source: 'transcript'
+    })
+  }
+  if (blocks.length > 0) {
+    messages.push({ id, role: messageRole, blocks, timestamp, source: 'transcript' })
+  }
+  return messages.length === 1 ? messages[0] : messages
 }
 
 /** A bash/python execution cell: the invocation, then its captured output. */
@@ -191,6 +214,37 @@ function ompContentBlocks(content: unknown): NativeChatBlock[] {
     }
   }
   return blocks
+}
+
+/** Splits one omp content array into its reasoning portion (`thinking`
+ *  entries, each becoming a plain text block) and everything else, preserving
+ *  each bucket's own relative order. Realistically only ever populated for an
+ *  assistant turn, but content-shape driven (not role-gated) so a turn with no
+ *  thinking entries costs nothing extra. */
+function ompSplitReasoningContent(content: unknown): {
+  reasoningBlocks: NativeChatBlock[]
+  blocks: NativeChatBlock[]
+} {
+  if (!Array.isArray(content)) {
+    return { reasoningBlocks: [], blocks: ompContentBlocks(content) }
+  }
+  const reasoningBlocks: NativeChatBlock[] = []
+  const blocks: NativeChatBlock[] = []
+  for (const item of content) {
+    const record = asRecord(item)
+    if (record?.type === 'thinking') {
+      const text = extractString(record.thinking) ?? extractString(record.text)
+      if (text) {
+        reasoningBlocks.push({ type: 'text', text })
+      }
+      continue
+    }
+    const block = ompContentBlock(record)
+    if (block) {
+      blocks.push(block)
+    }
+  }
+  return { reasoningBlocks, blocks }
 }
 
 /** Map one omp content entry; unknown block types yield null and are dropped. */

@@ -31,7 +31,13 @@ import { wslTranscriptFsRefusal } from './wsl-transcript-fs-gate'
 
 export const MAX_NATIVE_CHAT_TRANSCRIPT_RECORD_BYTES = 2 * 1024 * 1024
 
-export type NativeChatLineDecoder = (line: string, fallbackId: string) => NativeChatMessage | null
+// Why: a decoder may split one line into several messages (omp's
+// reasoning-before-reply split, decodeOmpTranscriptLine) — the other agents'
+// decoders are unaffected and keep returning a single message or null.
+export type NativeChatLineDecoder = (
+  line: string,
+  fallbackId: string
+) => NativeChatMessage | NativeChatMessage[] | null
 
 export function nativeChatLineDecoderForAgent(agent: AgentType): NativeChatLineDecoder | null {
   const transcriptAgent = resolveNativeChatTranscriptAgent(agent)
@@ -204,8 +210,19 @@ export async function readNativeChatTranscriptTailFile(
     // records so reconnect snapshots can replay completion without guessing
     // from the last visible assistant message.
     lifecycle ??= decodeLifecycle?.(line, fallbackId) ?? undefined
-    const message = decode(line, fallbackId)
-    if (message) {
+    // Why: this walk is newest-line-first, and the whole `newestFirst` array
+    // is reversed exactly once at the end (`chronological`) to produce
+    // chronological order — a line that splits into several messages (omp's
+    // reasoning-before-reply split) must be pushed in the OPPOSITE of its own
+    // chronological order here, so that single whole-array reverse restores
+    // reasoning-before-reply instead of flipping it, exactly like inter-line
+    // order already relies on that same reverse.
+    const decoded = decode(line, fallbackId)
+    if (decoded === null) {
+      return
+    }
+    const decodedMessages = Array.isArray(decoded) ? decoded.toReversed() : [decoded]
+    for (const message of decodedMessages) {
       messages.push({ message, offset: lineOffset })
     }
   }
