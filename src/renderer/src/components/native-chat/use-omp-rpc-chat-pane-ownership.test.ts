@@ -613,4 +613,154 @@ describe('useOmpRpcChatPaneOwnership', () => {
       )
     })
   })
+
+  // D1/D2 stale-record fix (wave 10): killPtyBeforeOmpRpcAcquire must clear
+  // the layout leaf's ptyIdsByLeafId entry too, not only the tab record —
+  // otherwise a pane whose eventual restore also fails keeps advertising a
+  // leaf pty id whose process is already gone.
+  describe('Critical A — clearing the layout leaf binding before kill', () => {
+    it('clears terminalLayoutsByTabId[tab].ptyIdsByLeafId for the killed pty before kill resolves', async () => {
+      acquire.mockResolvedValue({ ok: true })
+      useAppStore.setState({
+        tabsByWorktree: {
+          'wt-1': [
+            {
+              id: 'tab-1',
+              ptyId: 'pty-1',
+              worktreeId: 'wt-1',
+              title: null,
+              customTitle: null,
+              color: null,
+              sortOrder: 0,
+              createdAt: 1,
+              launchAgent: 'omp' as const
+            }
+          ]
+        } as never,
+        ptyIdsByTabId: { 'tab-1': ['pty-1'] },
+        terminalLayoutsByTabId: {
+          'tab-1': {
+            root: { type: 'leaf', leafId: '11111111-1111-4111-8111-111111111111' },
+            activeLeafId: '11111111-1111-4111-8111-111111111111',
+            expandedLeafId: null,
+            ptyIdsByLeafId: { '11111111-1111-4111-8111-111111111111': 'pty-1' }
+          }
+        }
+      })
+      let leafClearedBeforeKill = false
+      ptyKill.mockImplementation(async () => {
+        leafClearedBeforeKill =
+          useAppStore.getState().terminalLayoutsByTabId['tab-1']?.ptyIdsByLeafId === undefined
+      })
+
+      renderHook(() => useOmpRpcChatPaneOwnership(BASE_ARGS))
+
+      await waitFor(() => expect(ptyKill).toHaveBeenCalled())
+      expect(leafClearedBeforeKill).toBe(true)
+      expect(useAppStore.getState().terminalLayoutsByTabId['tab-1']?.ptyIdsByLeafId).toBeUndefined()
+    })
+  })
+
+  // D1 restore reliability (wave 10 root cause): wave 7's restore call sat
+  // AFTER the generation-supersede check, so a run whose kill genuinely
+  // happened but whose own acquire settled only after a later run had
+  // already started for the same identity (a real re-acquire's race —
+  // "toggling to Chat a second time" per the wave 10 brief) skipped
+  // restoring the PTY it killed entirely, leaving the pane with neither a
+  // terminal nor an RPC session. The fix moves the restore attempt before
+  // that check; this reproduces the exact race and proves it now restores.
+  describe('D1 restore reliability (wave 10)', () => {
+    it('restores the PTY a superseded run killed even though a later run already owns the identity', async () => {
+      const { promise: firstAcquire, resolve: resolveFirstAcquire } =
+        Promise.withResolvers<OmpRpcChatAcquireResult>()
+      acquire.mockReturnValueOnce(firstAcquire)
+      acquire.mockResolvedValueOnce({ ok: true })
+      const { rerender } = renderHook(
+        (props: UseOmpRpcChatPaneOwnershipArgs) => useOmpRpcChatPaneOwnership(props),
+        { initialProps: BASE_ARGS }
+      )
+      // Cycle 1's kill has run and its acquire call is in flight (unsettled).
+      await waitFor(() => expect(acquire).toHaveBeenCalledTimes(1))
+      expect(ptyKill).toHaveBeenCalledWith('pty-1', { keepHistory: true })
+
+      // A genuine identity rebind (cwd changes) starts cycle 2 for the same
+      // pane while cycle 1's acquire call is still pending — cycle 2's own
+      // acquire resolves immediately (ok: true), taking ownership of the
+      // identity before cycle 1 ever settles.
+      rerender({ ...BASE_ARGS, cwd: '/work/b' })
+      await waitFor(() => expect(ownershipEntry()?.status).toBe('acquired'))
+      expect(acquire).toHaveBeenCalledTimes(2)
+
+      // Cycle 1's own acquire now settles, as a failure, after cycle 2
+      // already owns the identity.
+      resolveFirstAcquire({ ok: false, reason: 'spawn-failed' })
+
+      await waitFor(() =>
+        expect(respawnPtyForOmpRpcChatHandback).toHaveBeenCalledWith({
+          paneKey: PANE_KEY,
+          replacedPtyId: 'pty-1',
+          cwd: '/work/a',
+          sessionId: 'session-1'
+        })
+      )
+      // Cycle 2's own acquired status must survive untouched — the
+      // superseded cycle 1 restores its own PTY but never publishes status.
+      expect(ownershipEntry()?.status).toBe('acquired')
+    })
+
+    it('retries the PTY restore once when the first attempt also fails', async () => {
+      acquire.mockResolvedValue({ ok: false, reason: 'spawn-failed' })
+      respawnPtyForOmpRpcChatHandback.mockRejectedValueOnce(new Error('ENOMEM'))
+      respawnPtyForOmpRpcChatHandback.mockResolvedValueOnce({ ok: true, ptyId: 'pty-restored' })
+
+      renderHook(() => useOmpRpcChatPaneOwnership(BASE_ARGS))
+
+      await waitFor(() => expect(ownershipEntry()?.status).toBe('spawn-failed'))
+      await waitFor(() => expect(respawnPtyForOmpRpcChatHandback).toHaveBeenCalledTimes(2))
+      expect(respawnPtyForOmpRpcChatHandback).toHaveBeenNthCalledWith(1, {
+        paneKey: PANE_KEY,
+        replacedPtyId: 'pty-1',
+        cwd: '/work/a',
+        sessionId: 'session-1'
+      })
+      expect(respawnPtyForOmpRpcChatHandback).toHaveBeenNthCalledWith(2, {
+        paneKey: PANE_KEY,
+        replacedPtyId: 'pty-1',
+        cwd: '/work/a',
+        sessionId: 'session-1'
+      })
+    })
+
+    // Requirement 4 (wave 10 brief): a full acquire -> hand-back -> acquire
+    // cycle, modeled on the hook's own real lifecycle — it never unmounts
+    // for an ordinary toggle (W6-2), so a genuine identity rebind via
+    // rerender is the correct transition, not unmount()/remount. Cycle 2
+    // uses the respawned ptyId hand-back would have bound (Decision 1),
+    // and its acquire fails — the pane must still end with a live PTY.
+    it('restores a live PTY after a second acquire fails following a genuine hand-back cycle', async () => {
+      acquire.mockResolvedValueOnce({ ok: true })
+      acquire.mockResolvedValueOnce({ ok: false, reason: 'spawn-failed' })
+      const { rerender } = renderHook(
+        (props: UseOmpRpcChatPaneOwnershipArgs) => useOmpRpcChatPaneOwnership(props),
+        { initialProps: BASE_ARGS }
+      )
+      await waitFor(() => expect(ownershipEntry()?.status).toBe('acquired'))
+      expect(ptyKill).toHaveBeenCalledExactlyOnceWith('pty-1', { keepHistory: true })
+
+      // Hand-back respawned pty-2 into the same pane, and the pane's cwd
+      // resolved identity moved on accordingly (a genuine rebind).
+      rerender({ ...BASE_ARGS, ptyId: 'pty-2', cwd: '/work/b' })
+
+      await waitFor(() => expect(ownershipEntry()?.status).toBe('spawn-failed'))
+      expect(ptyKill).toHaveBeenCalledWith('pty-2', { keepHistory: true })
+      await waitFor(() =>
+        expect(respawnPtyForOmpRpcChatHandback).toHaveBeenCalledWith({
+          paneKey: PANE_KEY,
+          replacedPtyId: 'pty-2',
+          cwd: '/work/b',
+          sessionId: 'session-1'
+        })
+      )
+    })
+  })
 })

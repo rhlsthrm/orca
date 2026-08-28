@@ -22,7 +22,11 @@ import type { OmpRpcClientEvent } from '../../../../shared/omp-rpc-protocol'
 import { parsePaneKey } from '../../../../shared/stable-pane-id'
 import { isOmpRpcCatalogAgent } from './use-omp-rpc-commands'
 import { useOmpPaneSessionIdentity } from './use-omp-pane-session-identity'
-import { respawnPtyForOmpRpcChatHandback } from './omp-rpc-chat-handback'
+import {
+  respawnPtyForOmpRpcChatHandback,
+  type OmpRpcChatHandbackArgs,
+  type OmpRpcChatHandbackResult
+} from './omp-rpc-chat-handback'
 
 export type UseOmpRpcChatPaneOwnershipArgs = {
   agent: AgentType | null
@@ -102,13 +106,43 @@ function subscribeOmpRpcChatFrames(
 
 /** Bounded backoff before retrying a single `agent_session_conflict` (F5):
  *  covers the release-in-flight and StrictMode-double-acquire windows without
- *  looping forever on a genuine, persistent conflict. */
+ *  looping forever on a genuine, persistent conflict. Also reused (wave 10)
+ *  for the single D1 restore retry below — same shape of problem, a likely
+ *  transient failure deserving exactly one second chance, never a loop. */
 const CONFLICT_RETRY_DELAY_MS = 250
 
 function delay(ms: number): Promise<void> {
   const { promise, resolve } = Promise.withResolvers<void>()
   setTimeout(resolve, ms)
   return promise
+}
+
+/** D1 fail-closed restore (wave 10, requirement 3): the RPC spawn that just
+ *  failed and the PTY respawn about to be attempted launch the same `omp`
+ *  binary, so a transient/environmental cause (e.g. memory pressure) can
+ *  plausibly fail both back to back. One bounded retry gives that specific
+ *  shape of failure a real second chance instead of the previous
+ *  fire-and-forget call whose own failure was silently discarded, while
+ *  still never looping — a second failure is treated as genuinely
+ *  unrecoverable this wave (see docs/omp-rpc-chat-adapter-plan.md for why
+ *  proving the RPC child can spawn before ever killing the PTY — closing
+ *  this gap at the root instead — is not implemented: `OmpRpcSessionOwner
+ *  .acquire()`'s spawn is gated behind `handoffFromPty`'s exit-proof, a
+ *  hard precondition, not an ordering choice this call site controls). */
+async function respawnPtyWithRetry(args: OmpRpcChatHandbackArgs): Promise<void> {
+  const attempt = (): Promise<OmpRpcChatHandbackResult> =>
+    respawnPtyForOmpRpcChatHandback(args).catch(
+      (error: unknown): OmpRpcChatHandbackResult => ({
+        ok: false,
+        reason: error instanceof Error ? error.message : String(error)
+      })
+    )
+  const first = await attempt()
+  if (first.ok) {
+    return
+  }
+  await delay(CONFLICT_RETRY_DELAY_MS)
+  await attempt()
 }
 
 /** Decision 1's acquire trigger: kill the pane's live PTY (scrollback kept
@@ -127,18 +161,24 @@ function delay(ms: number): Promise<void> {
  *  The suppression flag is left ARMED here, not self-consumed: onExit
  *  itself must be the one to consume it once the real exit round-trips
  *  back — self-consuming now would leave that later, real exit unsuppressed
- *  and fall through to the same tab-close bug. `clearTabPtyId` is also
- *  called proactively, putting the tab into a well-defined "RPC-owned, no
+ *  and fall through to the same tab-close bug. `clearTabPtyId` and
+ *  `clearTerminalLayoutPanePtyId` are also called proactively, putting the
+ *  tab AND the layout's leaf binding into a well-defined "RPC-owned, no
  *  PTY" state immediately rather than waiting on the kill's async round
- *  trip — onExit's own cleanup would eventually do this too (gated only on
- *  `preserveRendererBinding`, which this never sets), just not until the
- *  daemon confirms the exit. */
+ *  trip — onExit's own cleanup would eventually clear the tab record too
+ *  (gated only on `preserveRendererBinding`, which this never sets), but it
+ *  skips the layout leaf clear entirely for a suppressed exit (wave 10:
+ *  every other suppress-then-kill caller immediately rebinds the leaf
+ *  itself, so that skip was never reachable there before this feature) —
+ *  without the explicit call here, a pane whose eventual restore also
+ *  fails is left advertising a leaf pty id whose process is gone. */
 async function killPtyBeforeOmpRpcAcquire(paneKey: string, ptyId: string): Promise<void> {
   const store = useAppStore.getState()
   store.suppressPtyExit(ptyId)
   const parsed = parsePaneKey(paneKey)
   if (parsed) {
     store.clearTabPtyId(parsed.tabId, ptyId)
+    store.clearTerminalLayoutPanePtyId(parsed.tabId, parsed.leafId, ptyId)
   }
   try {
     await window.api?.pty?.kill(ptyId, { keepHistory: true })
@@ -334,26 +374,44 @@ export function useOmpRpcChatPaneOwnership(args: UseOmpRpcChatPaneOwnershipArgs)
           result = await acquireOnce()
         }
       }
+      // D1 fix (wave 7, root-caused wave 10): a failed acquire after the
+      // kill above must never leave the pane with neither a live terminal
+      // nor an RPC session — the exact "broken pane" outcome the wave-4
+      // review warned about. `api.release({respawn})` would no-op here:
+      // the registry never stored a session for this paneKey (acquire
+      // never reached `acquired`), so `released` comes back false and the
+      // `ompRpcChat:handback` push this pane's listener depends on never
+      // fires (release() only pushes it once a real release settles+exits
+      // — see omp-rpc-chat.ts). Call the same respawn the listener uses
+      // directly instead, retried once (respawnPtyWithRetry) since the
+      // failure that just killed the RPC acquire and the one about to
+      // attempt this respawn share a plausible common cause (both launch
+      // the same `omp` binary).
+      //
+      // Deliberately BEFORE the generation-supersede check below (wave 10
+      // root cause): that check exists to stop a stale run from publishing
+      // status over a newer run's, but restoring a PTY is a different
+      // obligation — this run, and only this run, killed the exact PTY in
+      // `respawnContext`, so giving it back can never race a *different*
+      // generation's own kill/restore of a *different* ptyId. Wave 7's
+      // restore sat after this check instead, so any run superseded while
+      // its acquire was still in flight (a later effect run starting for
+      // the same identity before this one's `acquireOnce()` settled) never
+      // reached the respawn call at all — silently leaving the pane with
+      // neither a live PTY nor RPC ownership on exactly a re-acquire's
+      // race. Awaiting it here (instead of the old fire-and-forget `void`)
+      // is what makes the retry possible and means a failure result is no
+      // longer discarded unread.
+      if (!result.ok && killed) {
+        await respawnPtyWithRetry({ paneKey, ...respawnContext })
+      }
       if (generation !== generationRef.current) {
         // Superseded by a later effect run, which owns this identity's
-        // lifecycle now — never release out from under it.
+        // lifecycle now — never publish status or release out from under
+        // it. The restore above already ran regardless, so this pane still
+        // gets its PTY back even though this run no longer owns anything
+        // else.
         return
-      }
-      // D1 fix (wave 7): a failed acquire after the kill above must never
-      // leave the pane with neither a live terminal nor an RPC session —
-      // the exact "broken pane" outcome the wave-4 review warned about, and
-      // the UAT bug this closes. `api.release({respawn})` would no-op here:
-      // the registry never stored a session for this paneKey (acquire never
-      // reached `acquired`), so `released` comes back false and the
-      // `ompRpcChat:handback` push this pane's listener depends on never
-      // fires (release() only pushes it once a real release settles+exits —
-      // see omp-rpc-chat.ts). Call the same respawn the listener uses
-      // directly instead. Covers both the ordinary and
-      // cancelled-before-settled races identically: either way, once
-      // `killed` is true the live PTY above is already gone and only this
-      // call brings one back.
-      if (!result.ok && killed) {
-        void respawnPtyForOmpRpcChatHandback({ paneKey, ...respawnContext }).catch(() => {})
       }
       if (cancelled) {
         // The pane unmounted, went invisible-before-ever-visible, or
