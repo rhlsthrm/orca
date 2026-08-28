@@ -54,6 +54,7 @@ This document records only decisions and live-probe facts that code does not car
 | `ab67e6711` | **Wave 5.** `ompRpcChat:release` pushes `ompRpcChat:handback` to the requesting sender once a respawn-intent release genuinely settles+exits; `use-omp-rpc-chat-handback-listener.ts`, wired into `TerminalPane` (stays mounted underneath `NativeChatView` through a "leave Chat view" unmount), performs the actual PTY respawn via the unchanged `respawnPtyForOmpRpcChatHandback`. Also wires finding E (`resolveSessionIdentity` verifies pty locality before scanning local disk) and finding C's exclusion set |
 | `b6627f37d` | **Wave 6.** W6-1: fixes the turn-completion flicker — `selectOmpRpcOverlayMessages` no longer gates fade-out on the binary `working` flag (a terminal `agent_end` has no debounce; the transcript path has a 150ms filesystem-watcher debounce plus IPC plus a re-render, so the old gate blanked the just-finished reply and reflowed it back in). `nativeChatOverlayLeadsTranscriptContent` (native-chat-streaming.ts) is the content-only comparison the RPC overlay now uses directly; `working` stays the D5 status/Stop signal only |
 | `a14b816f8` | **Wave 6.** W6-2: re-scopes RPC ownership (Decision 1) from the Chat-view mount to the pane's life. `use-omp-rpc-chat-session.ts` becomes `use-omp-rpc-chat-pane-ownership.ts`, mounted once in `TerminalPane` (which already stays mounted through the Chat-view unmount for the handback listener) instead of inside the (un)mountable `NativeChatView`. It composes the Decision-2 identity resolver on the same lifecycle and publishes status/turnState into a new `ompRpcChatOwnershipByPaneKey` store slice (mirrors `agentStatusByPaneKey`); `NativeChatView`/`use-native-chat-omp-rpc-integration.ts` becomes a pure remountable subscriber — `send`/`abort`/`respondExtensionUi` are now paneKey-scoped store actions, not hook-instance callbacks. Every prior guard (F9 latch, F5 generation/StrictMode, cancelled-before-acquired, bounded conflict retry, suppressPtyExit-before-kill left armed, `allowAbort` false, D1 fail-closed degrade) carries over unchanged; release now fires only on identity rebind, pane/tab close, or app quit — never a bare Terminal<->Chat toggle |
+| (wave 7) | **Wave 7.** First live UAT against a real OMP pane, and its two bugs. Bug 1 (empty pane after acquisition): `ompRpcChatOwnershipByPaneKey` gains a sticky `resolvedSessionId` (Decision 2's identity, published once known and never cleared by later ptyId churn); `NativeChatView`/`native-chat-pane-resolution.ts`'s new `resolveEffectiveNativeChatSessionId` prefers it over the still-broken hook chain (open item 2) for the transcript read and the command-marker cache scope. D1 hole closed in `use-omp-rpc-chat-pane-ownership.ts`: a failed acquire *after* the kill now calls `respawnPtyForOmpRpcChatHandback` directly (the registry-mediated `release({respawn})` path no-ops when nothing was ever acquired, so it never fires the handback push), instead of leaving the pane with neither a terminal nor a session. Bug 2a (reasoning flattened into plain text): `decodeOmpTranscriptLine` now splits a `thinking` content block into a separate `role: 'reasoning'` message ahead of the reply, matching the RPC overlay's existing role-based model; `TranscriptDecoder`/`NativeChatLineDecoder` widen to `NativeChatMessage \| NativeChatMessage[] \| null` across every read/tail/incremental/orchestration decode path, each one normalizing the split (the tail reader — the one the live chat view actually reads through — pushes a split line's messages in *reverse* order since it walks newest-line-first and reverses the whole accumulated list exactly once at the end). Bug 2b (recap): live-probed (`omp-rpc-live-recap-probe.test.ts`, `ORCA_OMP_RPC_LIVE=1`) — the recap never crosses the RPC wire across a complete real turn (18 frames, `agent-start` through `agent-end`, including an observed `advisor_cost_changed` frame); recorded as a ceiling below, not faked. Bug 2c (advisor transcript) scoped out this wave — justification in Open work item 2c below. |
 
 Note: commits are listed in dependency order, not `git log` order.
 
@@ -113,6 +114,21 @@ Note: commits are listed in dependency order, not `git log` order.
   `get_messages_page` is the likely mechanism for the deferred SSH/remote item (open item
   6) — a remote pane has no local transcript to overlay onto, which is exactly why the
   feature is local-only gated today. Not implemented this wave.
+- **The recap never crosses the RPC wire (wave 7, live-probed).** A one-shot
+  probe (`src/main/omp-rpc/omp-rpc-live-recap-probe.test.ts`,
+  `ORCA_OMP_RPC_LIVE=1`) sent one trivial prompt over a session-owning client
+  with the advisor active and dumped every frame, verbatim, from a complete
+  real turn (18 frames total: `ready`, `commands` x3, `agent-start`,
+  `turn-start`, `message-start`/`message-update` x3/`message-end` x2,
+  `turn-end`, `agent-end`, two `extension_ui_request{method:'setWidget',
+  widgetKey:'autoresearch'}` frames, and one `advisor_cost_changed` frame —
+  the same event wave 1 observed live). Neither `recap` nor `※` appears
+  anywhere in the dump outside one unrelated substring match inside the
+  command catalog (a skill literally named
+  `skill:aethos-staging-recapture-retrieval`). This settles UAT's bug 2b: the
+  recap is TUI-rendered and never written to the transcript, the advisor
+  file, or the RPC wire — see the Traps entry below for why a
+  transcript-tailing (or RPC-tailing) chat can never show it.
 
 ## Design decisions
 
@@ -297,11 +313,48 @@ Note: commits are listed in dependency order, not `git log` order.
    `{error:"Transcript unavailable", notFound:true}` → the chat view renders the user
    message but never the assistant reply, and `agentStatusByPaneKey` stays empty. `/usage`
    is unaffected only because it bypasses the transcript entirely.
+   **Wave 7 amendment — closed for the RPC-owned chat view specifically, still open for
+   the underlying hook.** Live UAT hit exactly this: an RPC-owned pane's Chat view still
+   fed the transcript read from this same broken `resolution.sessionId`, so the pane
+   rendered the empty state ("Start a chat with OMP") even after a completed turn, with
+   the composer correctly reporting no live terminal (RPC ownership had already killed
+   the PTY) — a D1 violation in practice: neither history nor terminal. Wave 4 built the
+   hook bypass (`use-omp-pane-session-identity.ts`, Decision 2) but wired it only to
+   acquisition, not the transcript read. `NativeChatView.tsx`/`native-chat-pane-resolution.ts`
+   now prefer a *sticky, store-published* copy of that resolved identity
+   (`ompRpcChatOwnershipByPaneKey[paneKey].resolvedSessionId`, written by the ownership
+   hook once known and never cleared by the pane's own later ptyId churn) over the hook
+   value — `resolveEffectiveNativeChatSessionId`. This closes the gap for the chat view
+   without fixing the hook itself; item 2's hook-delivery fix (below) is still what a
+   PTY-hosted (non-RPC-owned) OMP pane needs.
    Prime suspect: prod and dev builds write the same
    `~/.omp/agent/extensions/orca-agent-status.ts`, so hook endpoint routing can cross apps.
    Check whether the extension embeds an endpoint at write time or reads it from env at
    runtime (`src/main/pi/agent-status-extension-source.ts`,
    `src/main/ipc/pty/host-env/pi-agent.ts`, `src/shared/agent-hook-endpoint-file.ts`).
+2c. **Advisor transcript rendering (Bug 2c) — deferred, not implemented this wave.**
+   `omp://advisor-watchdog.md` documents that every finalized advisor turn is appended to
+   `__advisor*.jsonl` inside the owning session's artifacts directory (reserved
+   `__advisor` stem, append-only, follows session switches) — confirmed present and
+   correctly shaped for `decodeOmpTranscriptLine` (`type:'message'` rows carrying
+   `thinking`/`text` content, so Bug 2a's reasoning split already applies to it verbatim
+   if it were ever read). The doc also states accepted advisor notes land in the primary
+   transcript too, as XML-escaped `<advisory>` elements — Orca's decoder does not
+   currently decode that element at all, so double-rendering is not yet a risk, but any
+   future advisor read must check this before rendering both sources. Deferred rather
+   than implemented because: (a) it needs a new read source stitched into the message
+   list as a distinct, clearly-attributed, read-only "advisor" row — not a small addition
+   alongside Bug 1/2a/2b's scope, and this wave's working rules cap live-UAT-driven fixes
+   to what the UAT actually surfaced (the advisor's *absence* from chat was not itself a
+   reported UAT symptom, only inferred while investigating the recap); (b) the artifacts
+   directory's path-derivation-from-session-file rule is not yet implemented anywhere in
+   this codebase and needs its own existence-verification discipline (the same
+   never-hand-an-unverified-path lesson `omp-terminal-session-identity.ts` already
+   learned), which is real, unrehearsed work; (c) the dedup story against the `<advisory>`
+   primary-transcript duplicate needs a decoder change, not just a new read call. Next
+   wave's job if wanted: read `__advisor*.jsonl` alongside the primary transcript,
+   render its turns as a distinct advisor-kind row, and decode/suppress `<advisory>`
+   elements in the primary transcript so the same note is never shown twice.
 3. Subagent frames; unknown-frame diagnostic rendering; opt-in raw capture.
 4. Expand RPC command routing beyond the current `/usage`-only allowlist.
 5. Subscribe to OMP's `session_switch` event — flagged by `763add4d4`, still unsubscribed.
@@ -318,6 +371,16 @@ Note: commits are listed in dependency order, not `git log` order.
 
 ## Traps that cost real time
 
+- **The recap is a genuine architectural ceiling of the transcript/RPC approach, not a
+  gap to chase (wave 7).** OMP's TUI computes and renders its recap line entirely
+  client-side from in-memory state — it is never written to the session transcript, the
+  advisor's own `__advisor*.jsonl`, or any RPC frame (live-probed against a complete real
+  turn — see the Verified live facts entry above). A transcript-tailing chat, and an
+  RPC-wire chat, can therefore never show it, no matter how the read/overlay path is
+  built. Do not try to re-derive a lookalike client-side (the brief that drove this wave
+  explicitly forbids it) — inventing one would misattribute content to a fabricated
+  source. If the recap is ever wanted in Orca's chat, it needs a *new* OMP-side surface
+  (e.g. a dedicated frame type, or a transcript record), not a client-side workaround.
 - `hydrateShellPath` (`src/main/startup/hydrate-shell-path.ts`) caches its result promise
   process-wide **including a cold-start timeout failure**, which made `omp` permanently
   unresolvable (`executable-not-found` forever). `src/main/ipc/omp-rpc-executable-resolver.ts`
