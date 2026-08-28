@@ -42,15 +42,22 @@ export type UseOmpRpcChatPaneOwnershipArgs = {
   runtimeEnvironmentId: string | null
 }
 
-/** All four conditions the brief names: visible, OMP, a known session
- *  identity, and a local (non-runtime-owned) pane. Exported pure so the
- *  acquisition gate is unit-testable without mounting the hook. */
+/** Visible, OMP, local (non-runtime-owned), a paneKey, and a known
+ *  cwd/session identity. Exported pure so the acquisition gate is
+ *  unit-testable without mounting the hook.
+ *
+ *  Standing rule (wave 9, Defect 1): `ptyId` is deliberately NOT one of
+ *  these gates. Decision 1's acquisition kills the pane's live PTY on
+ *  success, so requiring `ptyId !== null` here would make the hook's own
+ *  success flip this eligible->false and tear the just-acquired ownership
+ *  back down — the exact deadlock this wave fixes. `ptyId` is consumed
+ *  only as an input to the acquire call itself, never as a precondition
+ *  for staying eligible. */
 export function isOmpRpcChatSessionEligible(args: {
   agent: AgentType | null
   isVisible: boolean
   runtimeEnvironmentId: string | null
   paneKey: string | null
-  ptyId: string | null
   cwd: string | null
   sessionFile: string | null
 }): boolean {
@@ -59,7 +66,6 @@ export function isOmpRpcChatSessionEligible(args: {
     isOmpRpcCatalogAgent(args.agent) &&
     args.runtimeEnvironmentId === null &&
     args.paneKey !== null &&
-    args.ptyId !== null &&
     args.cwd !== null &&
     args.sessionFile !== null
   )
@@ -153,6 +159,7 @@ export function useOmpRpcChatPaneOwnership(args: UseOmpRpcChatPaneOwnershipArgs)
   // doc comment for why a null return correctly keeps acquisition closed.
   const sessionFile = useOmpPaneSessionIdentity({
     agent,
+    paneKey,
     ptyId,
     cwd,
     runtimeEnvironmentId,
@@ -183,7 +190,15 @@ export function useOmpRpcChatPaneOwnership(args: UseOmpRpcChatPaneOwnershipArgs)
   // trigger release on its own afterward — toggling Chat -> Terminal and
   // back must not abort a live turn. The latch remembers "has this identity
   // ever been visible" and only resets on a genuine identity rebind.
-  const identityKey = `${paneKey ?? ''}:${ptyId ?? ''}:${cwd ?? ''}:${sessionFile ?? ''}`
+  //
+  // Standing rule (wave 9, Defect 1): this key — and everything derived
+  // from it (the latch, `identityEligible` below) — deliberately excludes
+  // `ptyId`. Decision 1's acquisition kills the pane's live PTY on success,
+  // so keying identity/eligibility on it makes the hook's own success
+  // invalidate the state it just published, tearing ownership back down.
+  // `ptyId` is consumed only where it is actually needed: as an input to
+  // the acquire call itself, captured once per genuine identity, below.
+  const identityKey = `${paneKey ?? ''}:${cwd ?? ''}:${sessionFile ?? ''}`
   const visibilityLatchRef = useRef<{ key: string; wasVisible: boolean }>({
     key: identityKey,
     wasVisible: false
@@ -201,14 +216,22 @@ export function useOmpRpcChatPaneOwnership(args: UseOmpRpcChatPaneOwnershipArgs)
   // this identity, so both callbacks racing to act on the same promise can
   // never both mutate state or both release.
   const generationRef = useRef(0)
+  // Once the acquire effect below has genuinely started pursuing an
+  // identity, a live `ptyId` is no longer required to stay eligible for
+  // it — read during render, written only by that effect, so a `ptyId`
+  // that goes null (acquisition's own kill) never regresses an identity
+  // already being pursued. Reset to null the moment an identity stops
+  // being pursued, so a later genuine rebind again requires a real
+  // `ptyId` to start.
+  const engagedIdentityRef = useRef<string | null>(null)
 
   const identityEligible =
     paneKey !== null &&
     isOmpRpcCatalogAgent(agent) &&
     runtimeEnvironmentId === null &&
-    ptyId !== null &&
     cwd !== null &&
-    sessionFile !== null
+    sessionFile !== null &&
+    (ptyId !== null || engagedIdentityRef.current === identityKey)
   const eligible = identityEligible && visibilityLatchRef.current.wasVisible
 
   useEffect(() => {
@@ -223,6 +246,7 @@ export function useOmpRpcChatPaneOwnership(args: UseOmpRpcChatPaneOwnershipArgs)
     setOmpRpcChatPaneStatus(paneKey, 'idle')
     dispatchOmpRpcChatTurnAction(paneKey, { type: 'reset' })
     if (!eligible) {
+      engagedIdentityRef.current = null
       return () => {
         clearOmpRpcChatPaneOwnership(paneKey)
       }
@@ -234,6 +258,14 @@ export function useOmpRpcChatPaneOwnership(args: UseOmpRpcChatPaneOwnershipArgs)
         clearOmpRpcChatPaneOwnership(paneKey)
       }
     }
+    // `eligible` only ever becomes true here with a real `ptyId` (a
+    // first-time engagement) or with `engagedIdentityRef` already matching
+    // (this identity's acquire/hold lifecycle already captured a real
+    // `ptyId` on the effect run that engaged it, and — because none of this
+    // effect's own dependencies include raw `ptyId` — that earlier run is
+    // still the one live; this run only ever fires fresh for a genuinely
+    // new identity, which always starts with a real `ptyId`).
+    engagedIdentityRef.current = identityKey
     let cancelled = false
     let unsubscribe: (() => void) | null = null
     let acquiredThisEffect = false
@@ -359,10 +391,16 @@ export function useOmpRpcChatPaneOwnership(args: UseOmpRpcChatPaneOwnershipArgs)
       }
       clearOmpRpcChatPaneOwnership(paneKey)
     }
+    // Why: `ptyId` and `identityKey` are deliberately excluded (wave 9,
+    // Defect 1's standing rule) — `identityKey` is a derived display of
+    // `paneKey`/`cwd`/`sessionFile`, already listed below, and `ptyId`
+    // churning to null from this effect's own kill must never re-trigger
+    // it; `ptyId`'s only use is a closure read of whatever value was live
+    // the one time this effect actually starts a fresh identity.
+    // oxlint-disable-next-line react-hooks/exhaustive-deps
   }, [
     eligible,
     paneKey,
-    ptyId,
     cwd,
     sessionFile,
     setOmpRpcChatPaneStatus,

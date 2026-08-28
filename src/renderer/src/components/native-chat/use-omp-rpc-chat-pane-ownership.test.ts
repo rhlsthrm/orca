@@ -108,14 +108,29 @@ afterEach(() => {
 })
 
 describe('isOmpRpcChatSessionEligible', () => {
-  it('requires every gate: visible, omp, local, a paneKey, and a known pty/cwd/session', () => {
+  it('requires every gate: visible, omp, local, a paneKey, and a known cwd/session', () => {
     expect(
       isOmpRpcChatSessionEligible({
         agent: 'omp',
         isVisible: true,
         runtimeEnvironmentId: null,
         paneKey: PANE_KEY,
-        ptyId: 'pty-1',
+        cwd: '/work/a',
+        sessionFile: 'session-1'
+      })
+    ).toBe(true)
+  })
+
+  // Wave 9, Defect 1 (standing rule): `ptyId` deliberately never gates
+  // this — Decision 1's acquisition kills it on success, so a live `ptyId`
+  // is not, and must never become, a precondition for eligibility.
+  it('stays eligible with no live ptyId', () => {
+    expect(
+      isOmpRpcChatSessionEligible({
+        agent: 'omp',
+        isVisible: true,
+        runtimeEnvironmentId: null,
+        paneKey: PANE_KEY,
         cwd: '/work/a',
         sessionFile: 'session-1'
       })
@@ -127,7 +142,6 @@ describe('isOmpRpcChatSessionEligible', () => {
     { agent: 'claude' as const },
     { runtimeEnvironmentId: 'runtime-1' },
     { paneKey: null },
-    { ptyId: null },
     { cwd: null },
     { sessionFile: null }
   ])('fails closed when %o overrides an otherwise-eligible pane', (overrides) => {
@@ -137,7 +151,6 @@ describe('isOmpRpcChatSessionEligible', () => {
         isVisible: true,
         runtimeEnvironmentId: null,
         paneKey: PANE_KEY,
-        ptyId: 'pty-1',
         cwd: '/work/a',
         sessionFile: 'session-1',
         ...overrides
@@ -305,7 +318,13 @@ describe('useOmpRpcChatPaneOwnership', () => {
     expect(acquire).toHaveBeenCalledTimes(1)
   })
 
-  it('resets turn state and re-acquires on an identity rebind (ptyId change)', async () => {
+  // Wave 9, Defect 1, acceptance criterion 5 (the deadlock this wave
+  // fixes): Decision 1's own acquisition kills the pane's live PTY on
+  // success, nulling `ptyId` out from under this hook. That must never be
+  // read as an identity rebind — ownership must stay 'acquired', never
+  // release, and never re-acquire, and no respawn/handback machinery may
+  // fire for a session that never actually died.
+  it('holds the acquired session when ptyId goes null after its own kill (Defect 1: no deadlock)', async () => {
     acquire.mockResolvedValue({ ok: true })
     const { rerender } = renderHook(
       (props: UseOmpRpcChatPaneOwnershipArgs) => useOmpRpcChatPaneOwnership(props),
@@ -317,7 +336,33 @@ describe('useOmpRpcChatPaneOwnership', () => {
     })
     expect(ownershipEntry()?.turnState.status).toBe('working')
 
-    rerender({ ...BASE_ARGS, ptyId: 'pty-2' })
+    // Models Decision 1's own effect: `clearTabPtyId` nulls the pane's
+    // ptyId as a side effect of the very acquisition this hook drove.
+    rerender({ ...BASE_ARGS, ptyId: null })
+
+    expect(ownershipEntry()?.status).toBe('acquired')
+    expect(ownershipEntry()?.turnState.status).toBe('working')
+    expect(release).not.toHaveBeenCalled()
+    expect(acquire).toHaveBeenCalledTimes(1)
+    expect(respawnPtyForOmpRpcChatHandback).not.toHaveBeenCalled()
+  })
+
+  // A genuine identity rebind (a different cwd — e.g. the pane's split
+  // target changed) must still release and re-acquire exactly as before;
+  // only `ptyId` churn on its own is exempted (Defect 1).
+  it('resets turn state and re-acquires on a genuine identity rebind (cwd change)', async () => {
+    acquire.mockResolvedValue({ ok: true })
+    const { rerender } = renderHook(
+      (props: UseOmpRpcChatPaneOwnershipArgs) => useOmpRpcChatPaneOwnership(props),
+      { initialProps: BASE_ARGS }
+    )
+    await waitFor(() => expect(ownershipEntry()?.status).toBe('acquired'))
+    act(() => {
+      lastSubscribedListener()({ kind: 'agent-start', frame: { type: 'agent_start' } })
+    })
+    expect(ownershipEntry()?.turnState.status).toBe('working')
+
+    rerender({ ...BASE_ARGS, cwd: '/work/b' })
 
     expect(release).toHaveBeenCalledWith({
       paneKey: PANE_KEY,
@@ -326,8 +371,8 @@ describe('useOmpRpcChatPaneOwnership', () => {
     await waitFor(() => expect(acquire).toHaveBeenCalledTimes(2))
     expect(acquire).toHaveBeenLastCalledWith({
       paneKey: PANE_KEY,
-      ptyId: 'pty-2',
-      cwd: '/work/a',
+      ptyId: 'pty-1',
+      cwd: '/work/b',
       sessionFile: 'session-1'
     })
     await waitFor(() => expect(ownershipEntry()?.status).toBe('acquired'))
