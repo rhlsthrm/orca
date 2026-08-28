@@ -61,6 +61,8 @@ This document records only decisions and live-probe facts that code does not car
 | `a0563d246` | **Wave 9.** First live UAT of an actual pane's identity/ownership lifecycle exposes two live bugs (Defects 1 & 2). Defect 1 fix, part 1: `resolveOmpPaneSessionIdentity`/the `ompRpcChat:resolveSessionIdentity` IPC handler accept an optional `ptyId` — Decision 1's acquisition kills the pane's PTY on success, so a live `ptyId` was never a legitimate precondition, only an optional accuracy input that unlocks the breadcrumb path over the mtime fallback. `paneKey` is threaded through the same call so the mtime fallback's already-claimed exclusion set can be scoped per-asker (Defect 2 below). Registry's `claimedSessionFilePaths()` becomes `claimedSessionFilePathsExcluding(paneKey)` |
 | `8d01c7305` | **Wave 9.** Defect 1 fix, part 2: `use-omp-pane-session-identity.ts` keys its resolution cache on `paneKey`+`cwd` instead of `ptyId`, drops the `ptyId!==null` eligibility gate, and makes resolution sticky (a later re-resolution can confirm an already-resolved id, never downgrade it to null or swap it for a different one) |
 | `b19ee822f` | **Wave 9.** Defect 1 fix, part 3 (the actual deadlock trigger): `use-omp-rpc-chat-pane-ownership.ts` duplicated the same `ptyId!==null` gate in its own `identityEligible`/F9 latch key, so even with the identity hook fixed, the acquire/hold effect tore ownership down the moment its own kill nulled `ptyId` — acquire succeeds, PTY dies, ownership resets to `idle`, composer disabled forever (proven live). Keys eligibility on `paneKey`+`cwd`+`sessionFile`; `ptyId` is still required to start acquiring (real kill target) but a live `engagedIdentityRef` keeps eligibility once acquisition has genuinely begun, and the effect's own dependencies no longer include raw `ptyId` so it never re-fires from its own kill. Same fix applied to `isOmpRpcChatSessionEligible`, the exported pure gate |
+| `67234f571` | **Wave 10.** `clearTerminalLayoutPanePtyId` — a new store primitive deleting a leaf's stale `terminalLayoutsByTabId[tab].ptyIdsByLeafId` entry, guarded on the id still matching so a race that already rebound the leaf is never clobbered. `clearTabPtyId` never touched this map; a leaf could keep advertising a pty id whose process was already gone |
+| `a9cca6315` | **Wave 10.** Live UAT (dev build, CDP) bug: toggling to Chat a second time after a successful hand-back left a dead pane (no PTY, no RPC child) — `use-omp-rpc-chat-pane-ownership.ts`'s restore-on-acquire-failure call (wave 7) sat AFTER the generation-supersede check, so a run whose kill genuinely happened but whose own acquire settled only after a later run had already started for the same identity skipped restoring the PTY it killed. Moved the restore attempt before that check (restoring a specific killed ptyId can never race a different generation's own kill/restore of a different one, superseded or not); retried once (`respawnPtyWithRetry`, same shared-failure-cause reasoning as F5's conflict retry); `killPtyBeforeOmpRpcAcquire` now also calls `clearTerminalLayoutPanePtyId` alongside `clearTabPtyId`. Full spawn-before-kill reordering was assessed and not implemented — `OmpRpcSessionOwner.acquire()`'s spawn is gated behind `handoffFromPty()`'s exit-proof, a hard precondition on this call site, not a reorderable choice; decoupling them needs a two-phase spawn-then-adopt IPC protocol, out of this wave's scope |
 
 Note: commits are listed in dependency order, not `git log` order.
 
@@ -156,6 +158,23 @@ Note: commits are listed in dependency order, not `git log` order.
   → both hooks discard the resolved identity and flip ineligible →
   ownership resets to `idle` → composer disabled forever. Both fixed this
   wave; see the Shipped table and the standing-rule Trap entry below.
+- **Wave 10's live UAT (dev build, CDP 9432) confirmed the first
+  acquire/hand-back cycle now works end to end.** First Chat toggle
+  acquires, composer enables ("Send a message…"), history renders, an RPC
+  prompt streams and is written to the real session file, and hand-back
+  respawns a PTY and resumes the correct session (verified via breadcrumb
+  + on-disk JSONL) — wave 9's Defect 1/2 fixes hold. Toggling to Chat a
+  SECOND time (a re-acquire after the successful hand-back) reproduced a
+  new bug: `ownership: {status:'spawn-failed', resolvedSessionId:'01a047d1-…'}`
+  (identity resolution correct — not at fault), `tab.ptyId` and
+  `layout.ptyIdsByLeafId` both still pointing at the just-killed pty, and a
+  process check finding **no** session-owning `omp --mode rpc` child and
+  **no** omp TUI for that pane — `killPtyBeforeOmpRpcAcquire` killed the
+  PTY, the RPC child failed to spawn (the machine had swap at ~95% during
+  the run; the spawn failure itself is environmental and out of scope —
+  see the Traps entry), and nothing restored the PTY: the exact "worst
+  outcome" D1 exists to prevent. Root-caused and fixed this wave — see the
+  Shipped table (`a9cca6315`).
 
 ## Design decisions
 
@@ -495,6 +514,23 @@ Note: commits are listed in dependency order, not `git log` order.
   genuinely PTY-scoped operations — writing into a live terminal, snapshotting
   its buffer, or gating a PTY-only affordance — not identity/ownership
   gates, and correctly still require a live `ptyId`.
+- **A "superseded generation, don't touch shared state" guard can silently
+  swallow an obligation that isn't shared state (wave 10).** Wave 7's
+  restore-on-acquire-failure call in `use-omp-rpc-chat-pane-ownership.ts`
+  sat after the `generation !== generationRef.current` check that exists
+  to stop a stale effect run from publishing *status* over a newer run's —
+  correct for status, wrong for the restore call, which does not touch
+  anything the newer run owns. Giving back the *specific* PTY this run
+  itself killed (closed over in its own `respawnContext`) can never race a
+  different generation's kill/restore of a *different* ptyId, so gating it
+  behind the same check as status-publishing let a real re-acquire race
+  (a later run starting for the same identity before this run's
+  `acquireOnce()` had settled) skip restoration entirely — the pane ended
+  up with neither a live PTY nor RPC ownership, live-UAT-proven. **Lesson:
+  before reusing a "some other run now owns this" guard for a second
+  purpose, check whether that purpose is actually about ownership of
+  shared state, or a private obligation (something only this run did) that
+  must discharge regardless of who owns what afterward.**
 
 ## Verification baseline
 
@@ -599,3 +635,42 @@ and produced live IPC evidence for both defects. The fix itself is
 unit-verified only — re-running the same live UAT against this fix is
 explicitly the next step, per the working rules for this wave (do not
 attempt live UAT; re-run by the human).
+
+## Wave 10 verification
+
+`npx -y pnpm@10.24.0 tc` — **0 errors, all three projects clean**.
+`check:code-quality:changed` — 0 findings (code quality, type-aware code
+quality, React Doctor all clean, 123 changed files).
+
+Targeted suites for every touched file pass clean:
+`use-omp-rpc-chat-pane-ownership.test.ts` (42 tests, 4 new — a race
+reproduction that reverting the fix demonstrably fails, a
+retry-on-respawn-failure test, a full acquire→hand-back→acquire cycle
+test, and layout-leaf-clear coverage), `terminal-layout-pty-clear.test.ts`
+(new, 4 tests for `clearTerminalLayoutPanePtyId`), plus regression sweeps
+of `omp-rpc-chat-handback.test.ts` and
+`terminal-pty-identity-replacement.test.ts` (53 tests total across the 4
+files).
+
+`npx -y pnpm@10.24.0 test` (64,704 tests): 3 failures on the full parallel
+run, none in a file this wave touched. Isolation re-run attributes each:
+- 2 in `repro-13767-shell-ready-marker-lost-to-exec.test.ts` — still fail
+  in isolation (real-subprocess PTY timing), matching the documented
+  baseline exactly.
+- 1 in `managed-hook-script-refresh.test.ts` (`ENOTEMPTY` removing an
+  isolated tmp userData dir) — passes clean in isolation; a tmpdir-cleanup
+  race under full-suite parallel load, unrelated to this wave (the file
+  has no relationship to native-chat/terminal/pty code).
+
+The previously-documented "6 `browser-*.electron.test.ts`, load-sensitive"
+bucket did not manifest any failures on this run.
+
+`npx -y pnpm@10.24.0 exec electron-vite build` — clean, exit 0.
+
+Live evidence: this wave's fix is unit-verified only, per the same
+working-rule constraint as wave 9 (re-running the live UAT is the human's
+next step). The race the new test reproduces was confirmed against the
+pre-fix code (reverting just the source change makes it fail with the
+exact "restore never called" symptom the live UAT observed), then
+confirmed passing again with the fix restored — the closest available
+substitute for a second live CDP run this wave.
