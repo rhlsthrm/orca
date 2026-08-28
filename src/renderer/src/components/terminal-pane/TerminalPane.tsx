@@ -73,6 +73,7 @@ import { useOmpRpcChatHandbackListener } from '../native-chat/use-omp-rpc-chat-h
 import { useOmpRpcChatPaneOwnership } from '../native-chat/use-omp-rpc-chat-pane-ownership'
 import { useOmpRpcProbeCwd } from '../native-chat/use-omp-rpc-commands'
 import { selectNativeChatRuntimeEnvironmentId } from '../native-chat/native-chat-runtime-owner'
+import { resolveEffectiveChatPanePtyId } from '../native-chat/native-chat-effective-pty-id'
 import { splitTerminalPaneWithInheritedCwd } from './terminal-pane-split-with-inherited-cwd'
 import { TerminalAgentSessionForkDialog } from './TerminalAgentSessionForkDialog'
 import { AgentSessionContinuationDialog } from '@/components/agent-session-continuation/AgentSessionContinuationDialog'
@@ -2977,8 +2978,15 @@ function TerminalPane(
     isChatViewMode && chatLeafId
       ? (managedPanes.find((pane) => pane.leafId === chatLeafId) ?? null)
       : null
+  // Wave 11: prefer the transport's own live binding (the ordinary,
+  // most-authoritative case) but fall back to the store's layout binding —
+  // Decision 1's RPC hand-back/restore rebinds only the store, never the
+  // transport, which otherwise stays stuck null forever after its own kill.
   const chatPanePtyId = chatPane
-    ? (paneTransportsRef.current.get(chatPane.id)?.getPtyId() ?? null)
+    ? resolveEffectiveChatPanePtyId(
+        paneTransportsRef.current.get(chatPane.id)?.getPtyId() ?? null,
+        savedLayout.ptyIdsByLeafId?.[chatPane.leafId]
+      )
     : null
   const chatPaneResolvedAgent = chatPane ? resolveTitleAgentForLeaf(chatPane.leafId) : null
   const chatPaneLaunchAgent = nativeChatLaunchAgentForLeaf({
@@ -3015,8 +3023,15 @@ function TerminalPane(
     ? (managedPanes.find((pane) => pane.leafId === chatLeafId) ?? null)
     : null
   const chatOwnerPaneKey = chatOwnerPane ? makePaneKey(tabId, chatOwnerPane.leafId) : null
+  // Wave 11: same transport/layout preference as chatPanePtyId above — this
+  // value also feeds useOmpRpcChatPaneOwnership's own `ptyId` (the acquire
+  // kill-target), which must see a restored PTY the transport never learned
+  // about, not just the composer.
   const chatOwnerPtyId = chatOwnerPane
-    ? (paneTransportsRef.current.get(chatOwnerPane.id)?.getPtyId() ?? null)
+    ? resolveEffectiveChatPanePtyId(
+        paneTransportsRef.current.get(chatOwnerPane.id)?.getPtyId() ?? null,
+        savedLayout.ptyIdsByLeafId?.[chatOwnerPane.leafId]
+      )
     : null
   const chatOwnerAgent = resolveAgentForLeaf(chatOwnerPane?.leafId ?? null)
   const chatOwnerRuntimeEnvironmentId = useAppStore((s) =>
