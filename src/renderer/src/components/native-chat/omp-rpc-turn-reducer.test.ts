@@ -29,6 +29,14 @@ const transcriptAssistant = (text: string): NativeChatMessage => ({
   source: 'transcript'
 })
 
+const transcriptReasoning = (text: string): NativeChatMessage => ({
+  id: 't-reasoning-1',
+  role: 'reasoning',
+  blocks: [{ type: 'text', text }],
+  timestamp: null,
+  source: 'transcript'
+})
+
 describe('ompRpcTurnReducer', () => {
   it('starts idle with no overlay content', () => {
     const state = createInitialOmpRpcTurnState()
@@ -342,6 +350,104 @@ describe('selectOmpRpcOverlayMessages', () => {
     ])
     const messages = selectOmpRpcOverlayMessages(state, [])
     expect(messages.map((m) => m.id)).toEqual([OMP_RPC_OVERLAY_REASONING_ID])
+  })
+
+  // Root cause (wave 12): the reasoning overlay was gated by comparing its
+  // thinking prose against the transcript's assistant prose, which never
+  // matches — the overlay leaked past its turn (rendered after the answer,
+  // never retired). It must retire against the transcript's own
+  // `role: 'reasoning'` row (wave-7 decoder output) instead.
+  it('retires the reasoning overlay once the transcript carries a matching reasoning row', () => {
+    const state = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking hard' }
+        }
+      },
+      { kind: 'agent-end', frame: { type: 'agent_end' } }
+    ])
+    const transcript = [transcriptReasoning('thinking hard about it'), transcriptAssistant('answer')]
+    const messages = selectOmpRpcOverlayMessages(state, transcript)
+    expect(messages.map((m) => m.id)).not.toContain(OMP_RPC_OVERLAY_REASONING_ID)
+  })
+
+  // Wave 6 anti-flicker preserved: a settled assistant answer alone (no
+  // reasoning row yet) must not retire the reasoning overlay — the
+  // transcript tailer may still be catching up on the reasoning row
+  // specifically, even though the answer already landed.
+  it('keeps the reasoning overlay when the transcript has the answer but no reasoning row yet', () => {
+    const state = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking hard' }
+        }
+      },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'answer' }
+        }
+      },
+      { kind: 'agent-end', frame: { type: 'agent_end' } }
+    ])
+    const messages = selectOmpRpcOverlayMessages(state, [transcriptAssistant('answer')])
+    expect(messages.map((m) => m.id)).toContain(OMP_RPC_OVERLAY_REASONING_ID)
+  })
+
+  // D4: once the transcript fully covers a settled turn (both its reasoning
+  // row and its answer), no overlay message may render — the visible order
+  // comes from the transcript rows alone.
+  it('renders zero overlay messages once the transcript fully covers a settled turn', () => {
+    const state = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking hard' }
+        }
+      },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'text_delta', delta: 'answer' }
+        }
+      },
+      { kind: 'agent-end', frame: { type: 'agent_end' } }
+    ])
+    const transcript = [
+      transcriptReasoning('thinking hard about it'),
+      transcriptAssistant('the full answer')
+    ]
+    expect(selectOmpRpcOverlayMessages(state, transcript)).toEqual([])
+  })
+
+  // D4: reasoning renders exactly once for a settled turn — the transcript's
+  // row once it lands, never the overlay's stale copy alongside it.
+  it('never double-renders reasoning once the transcript carries it', () => {
+    const state = reduceAll([
+      { kind: 'agent-start', frame: { type: 'agent_start' } },
+      {
+        kind: 'message-update',
+        frame: {
+          type: 'message_update',
+          assistantMessageEvent: { type: 'thinking_delta', delta: 'thinking hard' }
+        }
+      },
+      { kind: 'agent-end', frame: { type: 'agent_end' } }
+    ])
+    const transcript = [transcriptReasoning('thinking hard'), transcriptAssistant('answer')]
+    const overlayIds = selectOmpRpcOverlayMessages(state, transcript).map((m) => m.id)
+    const reasoningOccurrences = overlayIds.filter((id) => id === OMP_RPC_OVERLAY_REASONING_ID).length
+    expect(reasoningOccurrences).toBe(0)
   })
 
   it('shows a reasoning overlay ahead of the reply overlay', () => {

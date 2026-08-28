@@ -19,7 +19,10 @@
 // `assistantMessageEvent` stream is assistant-only by construction.
 
 import type { NativeChatBlock, NativeChatMessage } from '../../../../shared/native-chat-types'
-import { nativeChatOverlayLeadsTranscriptContent } from '../../../../shared/native-chat-streaming'
+import {
+  nativeChatOverlayLeadsTranscriptContent,
+  nativeChatOverlayLeadsTranscriptReasoning
+} from '../../../../shared/native-chat-streaming'
 import type {
   OmpRpcClientEvent,
   OmpRpcExtensionUiRequestFrame
@@ -328,7 +331,7 @@ export function selectOmpRpcOverlayMessages(
   const messages: NativeChatMessage[] = []
   if (
     state.reasoningText.trim() &&
-    nativeChatOverlayLeadsTranscriptContent({
+    nativeChatOverlayLeadsTranscriptReasoning({
       messages: transcriptMessages,
       overlayText: state.reasoningText
     })

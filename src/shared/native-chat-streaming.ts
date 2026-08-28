@@ -10,16 +10,46 @@ import type { NativeChatMessage } from './native-chat-types'
  *  consistently across ticks and the real turn can replace it cleanly). */
 export const NATIVE_CHAT_STREAMING_ID = 'streaming'
 
-/** Concatenated text of an assistant message's text blocks, trimmed. */
-export function nativeChatAssistantText(message: NativeChatMessage | undefined): string {
-  if (!message || message.role !== 'assistant') {
-    return ''
-  }
+/** Concatenated text of a message's text blocks, trimmed. */
+function messageText(message: NativeChatMessage): string {
   return message.blocks
     .filter((b) => b.type === 'text')
     .map((b) => (b.type === 'text' ? b.text : ''))
     .join('')
     .trim()
+}
+
+/** Concatenated text of an assistant message's text blocks, trimmed. */
+export function nativeChatAssistantText(message: NativeChatMessage | undefined): string {
+  if (!message || message.role !== 'assistant') {
+    return ''
+  }
+  return messageText(message)
+}
+
+/** Text of the most recent transcript row with the given role, scanning
+ *  from the end and stopping at the first `role: 'user'` row (the boundary
+ *  of the current turn) — so a stale row of that role from an earlier turn
+ *  is never matched once the current turn's optimistic user echo has
+ *  landed. Unlike `nativeChatAssistantText(messages.at(-1))`, which only
+ *  ever checks the literal last message (correct for assistant prose, which
+ *  is always the final row of a settled turn), a transcript's `reasoning`
+ *  row (wave-7 decoder output) is followed by that turn's assistant reply,
+ *  so it is never the last message once fully flushed — it needs a scan. */
+function lastTurnMessageText(
+  messages: readonly NativeChatMessage[],
+  role: NativeChatMessage['role']
+): string {
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const message = messages[i]
+    if (message.role === role) {
+      return messageText(message)
+    }
+    if (message.role === 'user') {
+      return ''
+    }
+  }
+  return ''
 }
 
 /**
@@ -41,6 +71,29 @@ export function nativeChatOverlayLeadsTranscriptContent(args: {
     return false
   }
   const lastText = nativeChatAssistantText(messages.at(-1))
+  return !(lastText.includes(text) || text.length <= lastText.length)
+}
+
+/**
+ * Content-only leads comparison for the reasoning overlay: whether the
+ * overlay's reasoning text is longer than (and not already contained in)
+ * the transcript's own `role: 'reasoning'` row (wave-7 decoder output) for
+ * the current turn. Deliberately never compares against the transcript's
+ * assistant prose — thinking prose never matches an assistant reply, so
+ * that compare left the reasoning overlay leading (and thus rendering)
+ * forever, even long after the transcript settled the turn. See
+ * `lastTurnMessageText` for the turn-boundary scan.
+ */
+export function nativeChatOverlayLeadsTranscriptReasoning(args: {
+  messages: readonly NativeChatMessage[]
+  overlayText: string
+}): boolean {
+  const { messages, overlayText } = args
+  const text = overlayText.trim()
+  if (!text) {
+    return false
+  }
+  const lastText = lastTurnMessageText(messages, 'reasoning')
   return !(lastText.includes(text) || text.length <= lastText.length)
 }
 
