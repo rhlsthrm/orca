@@ -222,6 +222,10 @@ export class TerminalHost {
     return await resolveTerminalHostSessionCwd(this.getAliveSession(sessionId))
   }
 
+  getSlavePath(sessionId: string): string | null {
+    return this.getAliveSession(sessionId).getSlavePath()
+  }
+
   // Why: null-not-throw — fetched for the tab-bar icon, so a vanished pane should quietly yield "no agent".
   getForegroundProcess(sessionId: string): string | null {
     const session = this.sessions.get(sessionId)

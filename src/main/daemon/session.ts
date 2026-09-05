@@ -252,6 +252,10 @@ export class Session {
     return this.output.getCwd()
   }
 
+  getSlavePath(): string | null {
+    return this.subprocess.slavePath ?? null
+  }
+
   getForegroundProcess(options?: { rawFallback?: boolean }): string | null {
     return this.subprocess.getForegroundProcess(options)
   }

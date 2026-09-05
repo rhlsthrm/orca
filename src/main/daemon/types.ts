@@ -205,6 +205,14 @@ export type GetCwdRequest = {
   }
 }
 
+export type GetSlavePathRequest = {
+  id: string
+  type: 'getSlavePath'
+  payload: {
+    sessionId: string
+  }
+}
+
 export type ClearScrollbackRequest = {
   id: string
   type: 'clearScrollback'
@@ -316,6 +324,7 @@ export type DaemonRequest =
   | ShutdownIfIdleRequest
   | DetachRequest
   | GetCwdRequest
+  | GetSlavePathRequest
   | GetForegroundProcessRequest
   | InspectProcessRequest
   | ConfirmForegroundProcessRequest
