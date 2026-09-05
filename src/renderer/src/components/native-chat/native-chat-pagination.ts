@@ -50,6 +50,13 @@ export type NativeChatReadPage = {
   tailLimit: number
 }
 
+/** The window every session starts from. Shared and frozen rather than rebuilt per hook: every
+ *  writer REPLACES `windowRef.current` (never mutates it in place), so one instance is safe — and
+ *  a bare reference keeps the lazy-useRef ratchet satisfied without a second initialisation line. */
+export const INITIAL_NATIVE_CHAT_READ_WINDOW: NativeChatReadWindow = Object.freeze({
+  limit: NATIVE_CHAT_INITIAL_LIMIT
+})
+
 export function initialNativeChatReadWindow(): NativeChatReadWindow {
   return { limit: NATIVE_CHAT_INITIAL_LIMIT }
 }
@@ -170,7 +177,9 @@ function nativeChatEarlierPageVerdict(
 ): NativeChatOlderHistoryVerdict {
   const returned = result?.messages.length ?? 0
   const reachedHead =
-    result?.hasMore !== undefined ? !result.hasMore : !hasMoreNativeChatHistory(returned, page.limit)
+    result?.hasMore !== undefined
+      ? !result.hasMore
+      : !hasMoreNativeChatHistory(returned, page.limit)
   if (reachedHead) {
     return 'none'
   }

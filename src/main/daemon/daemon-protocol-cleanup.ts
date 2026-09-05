@@ -45,6 +45,7 @@ export async function cleanupDaemonForProtocol(
   let killedCount = 0
   let didRequestShutdown = false
   let didKillStaleDaemon = false
+  let shutdownAnswered = false
   let physicalPtyExitVerified = false
   try {
     await client.ensureConnected()
@@ -58,6 +59,10 @@ export async function cleanupDaemonForProtocol(
       .request<DaemonShutdownResult>('shutdown', { killSessions: true })
       .catch(() => null)
     didRequestShutdown = true
+    // A lost reply is NOT a failed shutdown: the daemon exits immediately after the RPC, so the
+    // socket routinely closes before the response lands. Only an ANSWER that withholds the proof
+    // says the old incarnation may still own PTY children.
+    shutdownAnswered = shutdown !== null
     physicalPtyExitVerified = shutdown?.physicalPtyExitVerified === true
   } catch {
     // Previous-protocol daemons may be wedged or too old for the RPC path; fall back to PID cleanup (only unlinks a live socket after proving the process is killed).
@@ -75,7 +80,9 @@ export async function cleanupDaemonForProtocol(
     client.disconnect()
   }
 
-  if (didRequestShutdown && !physicalPtyExitVerified) {
+  // An unanswered shutdown still has a proof path below: `waitForDaemonEndpointExit` only returns
+  // true once the endpoint is gone, which is itself evidence the owner process exited.
+  if (didRequestShutdown && shutdownAnswered && !physicalPtyExitVerified) {
     throw new Error('Daemon shutdown did not prove physical PTY exit')
   }
 

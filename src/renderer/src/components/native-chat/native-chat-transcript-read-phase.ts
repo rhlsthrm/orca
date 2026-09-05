@@ -39,3 +39,21 @@ export function applyNativeChatEarlierPage(
     ? { phase: 'ready', messages }
     : { phase: 'ready', messages: [...messages, ...previous.messages] }
 }
+
+/** Identity of the transcript a pane is reading. Any change here retires the current read and
+ *  starts a new one, so it is computed in one place rather than inline in the hook. */
+export function nativeChatTranscriptSourceKey(args: {
+  paneKey: string
+  agent: string
+  sessionId: string | null
+  transcriptPath?: string | null
+  runtimeEnvironmentId?: string | null
+}): string {
+  return JSON.stringify([
+    args.paneKey,
+    args.runtimeEnvironmentId ?? null,
+    args.agent,
+    args.sessionId,
+    args.transcriptPath ?? null
+  ])
+}

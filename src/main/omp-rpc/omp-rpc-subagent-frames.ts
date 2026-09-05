@@ -11,8 +11,10 @@ import type {
   OmpRpcSubagentLifecycleFrame,
   OmpRpcSubagentProgressFrame
 } from '../../shared/omp-rpc-subagent-protocol'
-import { OMP_RPC_SUBAGENT_LIFECYCLE_STATUSES } from '../../shared/omp-rpc-subagent-protocol'
-import { OMP_RPC_SUBAGENT_STATUSES } from '../../shared/omp-rpc-subagent-protocol'
+import {
+  OMP_RPC_SUBAGENT_LIFECYCLE_STATUSES,
+  OMP_RPC_SUBAGENT_STATUSES
+} from '../../shared/omp-rpc-subagent-protocol'
 import { isOmpRpcObject } from './omp-rpc-frame-validation'
 
 function isIdentified(payload: Record<string, unknown>): boolean {

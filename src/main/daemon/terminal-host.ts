@@ -23,6 +23,7 @@ import { TerminalAttachCanceledError } from './daemon-errors'
 import { rejectOnAbort } from './terminal-attach-cancellation'
 import { randomUUID } from 'node:crypto'
 import { pruneRetiredPtyIncarnations } from '../../shared/retired-pty-incarnations'
+import { assertInspectableSession } from './terminal-host-inspect-guard'
 import {
   inspectTerminalHostProcess,
   type TerminalHostProcessInspection
@@ -239,18 +240,13 @@ export class TerminalHost {
     sessionId: string,
     options?: { expectedIncarnationId?: string; steadyState?: boolean }
   ): Promise<TerminalHostProcessInspection> {
-    pruneRetiredPtyIncarnations(this.retiredIncarnations)
     const session = this.sessions.get(sessionId)
-    if (
-      (!session || !session.isAlive) &&
-      !(
-        (this.retiredIncarnations.get(sessionId)?.expiresAt ?? 0) > Date.now() &&
-        options?.expectedIncarnationId === this.retiredIncarnations.get(sessionId)?.incarnationId
-      )
-    ) {
-      // Preserve the historical synchronous missing-session failure.
-      throw new SessionNotFoundError(sessionId)
-    }
+    assertInspectableSession({
+      sessionId,
+      isAlive: session?.isAlive === true,
+      retiredIncarnations: this.retiredIncarnations,
+      expectedIncarnationId: options?.expectedIncarnationId
+    })
     return inspectTerminalHostProcess({
       sessionId,
       session: session?.isAlive ? session : null,

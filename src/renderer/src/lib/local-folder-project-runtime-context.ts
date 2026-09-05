@@ -1,9 +1,12 @@
 import type { AppState } from '@/store/types'
 import { LOCAL_EXECUTION_HOST_ID } from '../../../shared/execution-host'
 import { parseWslUncPath } from '../../../shared/wsl-paths'
-import { resolveProjectExecutionRuntime, type ProjectExecutionRuntimeResolution } from '../../../shared/project-execution-runtime'
+import {
+  deriveGlobalWindowsRuntimeDefaultFromLegacySettings,
+  resolveProjectExecutionRuntime,
+  type ProjectExecutionRuntimeResolution
+} from '../../../shared/project-execution-runtime'
 import { folderWorkspaceKey } from '../../../shared/workspace-scope'
-import { deriveGlobalWindowsRuntimeDefaultFromLegacySettings } from '../../../shared/project-execution-runtime'
 import { getResolvedExecutionHostIdForWorktree } from './resolved-worktree-execution-host'
 
 type LocalFolderRuntimeState = Pick<AppState, 'activeWorktreeId' | 'repos' | 'settings' | 'worktreesByRepo'> & Partial<Pick<AppState, 'activeWorkspaceExecutionHostId' | 'folderWorkspaces' | 'projectGroups' | 'restoredRuntimeHostIdByWorkspaceSessionKey'>>

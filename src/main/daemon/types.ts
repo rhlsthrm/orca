@@ -12,6 +12,10 @@ export type {
   InspectProcessRequest
 } from './daemon-foreground-process-protocol'
 
+import type { GetCwdRequest, GetSlavePathRequest } from './daemon-session-path-protocol'
+
+export type { GetCwdRequest, GetSlavePathRequest } from './daemon-session-path-protocol'
+
 // ─── Protocol Version ────────────────────────────────────────────────
 import type { StartupCommandDelivery } from '../../shared/codex-startup-delivery'
 import type { TuiAgent } from '../../shared/tui-agent'
@@ -192,22 +196,6 @@ export type ShutdownIfIdleRequest = {
 export type DetachRequest = {
   id: string
   type: 'detach'
-  payload: {
-    sessionId: string
-  }
-}
-
-export type GetCwdRequest = {
-  id: string
-  type: 'getCwd'
-  payload: {
-    sessionId: string
-  }
-}
-
-export type GetSlavePathRequest = {
-  id: string
-  type: 'getSlavePath'
   payload: {
     sessionId: string
   }

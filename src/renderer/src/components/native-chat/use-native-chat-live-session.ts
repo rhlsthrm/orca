@@ -6,14 +6,18 @@ import {
   type NativeChatSession,
   type NativeChatTurnLifecycle
 } from '../../../../shared/native-chat-types'
-import { applyAppend, createNativeChatMerger, replaceList } from '../../../../shared/native-chat-merge'
+import {
+  applyAppend,
+  createNativeChatMerger,
+  replaceList
+} from '../../../../shared/native-chat-merge'
 import { mergeNativeChatLiveSession } from './native-chat-live-status'
 import {
   canLoadEarlierNativeChatHistory,
   nativeChatOlderHistoryFromFrame,
   nativeChatOlderHistoryFromReadResult,
   type NativeChatOlderHistoryVerdict,
-  initialNativeChatReadWindow,
+  INITIAL_NATIVE_CHAT_READ_WINDOW,
   nextNativeChatPage
 } from './native-chat-pagination'
 import { getNativeChatSessionTransport } from './native-chat-session-transport'
@@ -21,10 +25,14 @@ import { useNativeChatTranscriptLifecycle } from './use-native-chat-transcript-l
 import { useNativeChatHookStatus } from './use-native-chat-hook-status'
 import { useNativeChatAssembledMessages } from './use-native-chat-assembled-messages'
 import { createNativeChatReadRetryTimer } from './native-chat-read-retry-timer'
-import { nextNativeChatSubscriptionId, openNativeChatTranscriptStream } from './native-chat-stream-teardown'
+import {
+  nextNativeChatSubscriptionId,
+  openNativeChatTranscriptStream
+} from './native-chat-stream-teardown'
 import {
   applyNativeChatEarlierPage,
   isNativeChatTranscriptUnsettled,
+  nativeChatTranscriptSourceKey,
   NOTFOUND_RETRY_WINDOW_MS,
   type ReadState
 } from './native-chat-transcript-read-phase'
@@ -102,7 +110,7 @@ export function useNativeChatLiveSession(
   const [transcriptLifecycle, transcriptLifecycleControl] = useNativeChatTranscriptLifecycle()
   // The active read window; raised by loadEarlier to page in older history, then
   // continued by byte offset once that growth saturates at the wire ceiling.
-  const windowRef = useRef(initialNativeChatReadWindow())
+  const windowRef = useRef(INITIAL_NATIVE_CHAT_READ_WINDOW)
 
   // Appended messages accumulate separately from the snapshot so pagination doesn't lose in-flight appends; merged by id and capped to the read window (#6).
   const [appended, setAppended] = useState<NativeChatMessage[]>([])
@@ -124,13 +132,7 @@ export function useNativeChatLiveSession(
   const latestTransport = useRef(transport)
   latestTransport.current = transport
   const transcriptEpochRef = useRef(0)
-  const sourceKey = JSON.stringify([
-    paneKey,
-    runtimeEnvironmentId ?? null,
-    agent,
-    sessionId,
-    transcriptPath ?? null
-  ])
+  const sourceKey = nativeChatTranscriptSourceKey(args)
   const retainedSourceKeyRef = useRef(sourceKey)
 
   useEffect(() => {
@@ -141,7 +143,7 @@ export function useNativeChatLiveSession(
     retainedSourceKeyRef.current = sourceKey
     if (!enabled) {
       if (sourceChanged) {
-        windowRef.current = initialNativeChatReadWindow()
+        windowRef.current = INITIAL_NATIVE_CHAT_READ_WINDOW
         transcriptLifecycleControl.reset()
         setRead({ phase: 'loading' })
         replaceList(appendMergerRef.current, [])
@@ -172,7 +174,7 @@ export function useNativeChatLiveSession(
     const activeSessionId = sessionId
     // Why: a reveal re-reads the same source, so keep the window the user paged in; only a new source starts over.
     if (sourceChanged) {
-      windowRef.current = initialNativeChatReadWindow()
+      windowRef.current = INITIAL_NATIVE_CHAT_READ_WINDOW
     }
     setRead({ phase: 'loading' })
     replaceList(appendMergerRef.current, [])
