@@ -6,14 +6,25 @@ import {
   type NativeChatSession,
   type NativeChatSessionStatus
 } from '../../../../shared/native-chat-types'
-import { NATIVE_CHAT_STREAMING_ID } from '../../../../shared/native-chat-streaming'
-import { normalizeImageTranscriptMessages } from '../../../../shared/native-chat-image-transcript-markers'
+import {
+  isOmpRpcOverlayMessageId,
+  NATIVE_CHAT_STREAMING_ID
+} from '../../../../shared/native-chat-streaming'
+import {
+  hasImagePromptMarker,
+  isImageSourceUserTurn,
+  normalizeImageTranscriptMessages
+} from '../../../../shared/native-chat-image-transcript-markers'
 import { isLaunchPromptMessageId, isPendingMessageId } from './native-chat-pending'
 
-/** Messages grouped by source. Higher-priority sources (transcript > hook >
- *  scrape) supersede lower ones when they describe the same turn. */
+/** Messages grouped by source. Higher-priority sources (transcript > rpc >
+ *  hook > scrape) supersede lower ones when they describe the same turn.
+ *  `rpc` is a hydrated OMP history snapshot: the same conversation the
+ *  transcript holds, but recovered over the wire and carrying no stable id, so
+ *  it collapses onto the transcript copy through the turn-key fallback. */
 export type NativeChatSources = {
   transcript?: NativeChatMessage[]
+  rpc?: NativeChatMessage[]
   hook?: NativeChatMessage[]
   scrape?: NativeChatMessage[]
 }
@@ -44,6 +55,14 @@ function turnKey(message: NativeChatMessage): string {
   if (message.turnId) {
     return `turn:${message.turnId}`
   }
+  return nativeChatTurnContentKey(message)
+}
+
+/** The content half of `turnKey`, without the explicit-`turnId` short circuit.
+ *  Exported for the RPC-history window alignment
+ *  (native-chat-rpc-history-merge.ts), which must find the overlap even when a
+ *  transcript record carries a `turnId` its wire-history twin has no room for. */
+export function nativeChatTurnContentKey(message: NativeChatMessage): string {
   const text = message.blocks
     .filter(isTextBlock)
     .map((block) => block.text)
@@ -91,7 +110,9 @@ function supersedes(candidate: NativeChatMessage, existing: NativeChatMessage): 
 // of the optimistic composer echoes, which carry finite `sentAt` timestamps that
 // would otherwise sort past it. Rank first, then timestamp within a tier.
 function messageSortRank(message: NativeChatMessage): number {
-  if (message.id === NATIVE_CHAT_STREAMING_ID) {
+  // The RPC turn overlay shares that tier (XLR-007): it is the same live
+  // tail for an RPC-owned pane, and the two never render together.
+  if (message.id === NATIVE_CHAT_STREAMING_ID || isOmpRpcOverlayMessageId(message.id)) {
     return 1
   }
   if (isPendingMessageId(message.id) || isLaunchPromptMessageId(message.id)) {
@@ -100,9 +121,8 @@ function messageSortRank(message: NativeChatMessage): number {
   return 0
 }
 
-// Why: null timestamps (sources that can't supply one, e.g. scrape segments)
-// sort before any real timestamp within their tier so they don't jump to the
-// end. Ties break on id for a stable, deterministic order.
+// Null timestamps sort before real ones within their tier. OMP split siblings
+// share a timestamp, so preserve reasoning-before-reply before the generic id tie-break.
 export function compareMessages(a: NativeChatMessage, b: NativeChatMessage): number {
   const ar = messageSortRank(a)
   const br = messageSortRank(b)
@@ -113,6 +133,12 @@ export function compareMessages(a: NativeChatMessage, b: NativeChatMessage): num
   const bt = b.timestamp ?? Number.NEGATIVE_INFINITY
   if (at !== bt) {
     return at - bt
+  }
+  if (a.id === `${b.id}:reasoning`) {
+    return -1
+  }
+  if (b.id === `${a.id}:reasoning`) {
+    return 1
   }
   if (a.id < b.id) {
     return -1
@@ -125,7 +151,7 @@ export function compareMessages(a: NativeChatMessage, b: NativeChatMessage): num
 
 /**
  * Pure merge of layered conversation sources into a single ordered, deduped
- * `NativeChatSession`. Precedence: transcript > hook > scrape. Dedup happens on
+ * `NativeChatSession`. Precedence: transcript > rpc > hook > scrape. Dedup happens on
  * message id and on turn key (explicit turnId, else role + normalized text), so
  * the same turn from multiple sources collapses to the highest-priority copy.
  */
@@ -135,13 +161,18 @@ export function assembleNativeChatSession(
   const { sources, sessionId, agent, status, error } = input
 
   // Process highest priority first so a later, lower-priority duplicate is
-  // dropped rather than overwriting. Within a source, order is preserved.
+  // dropped rather than overwriting. Sort each source before image folding so
+  // equal-timestamp companion/prompt rows retain semantic order.
   const ordered: NativeChatMessage[] = [
-    ...normalizeImageTranscriptMessages(sources.transcript ?? []),
+    ...normalizeImageTranscriptMessages(sortForImageNormalization(sources.transcript ?? [])),
+    // Hydrated RPC history carries the same `[Image: source: …]` markers the
+    // transcript does — it is decoded by the same omp decoder, so it needs the
+    // same companion/prompt ordering pass before folding.
+    ...normalizeImageTranscriptMessages(sortForImageNormalization(sources.rpc ?? [])),
     ...(sources.hook ?? []),
     // Scrape segments carry the same raw `[Image: source: …]` markers (e.g. from
     // scrollback before the transcript loads), so normalize them too.
-    ...normalizeImageTranscriptMessages(sources.scrape ?? [])
+    ...normalizeImageTranscriptMessages(sortForImageNormalization(sources.scrape ?? []))
   ]
 
   const byId = new Map<string, NativeChatMessage>()
@@ -162,6 +193,76 @@ export function assembleNativeChatSession(
     agent,
     ...(error ? { error } : {})
   }
+}
+
+type ImageNormalizationUnit = {
+  messages: NativeChatMessage[]
+  sortKey: NativeChatMessage
+}
+
+// Keep only adjacent companion/prompt rows atomic; ranking every companion first
+// can cross-fold distinct turns that share a timestamp.
+export function sortForImageNormalization(
+  messages: readonly NativeChatMessage[]
+): readonly NativeChatMessage[] {
+  const units: ImageNormalizationUnit[] = []
+  for (let index = 0; index < messages.length; index += 1) {
+    const message = messages[index]!
+    const companions: NativeChatMessage[] = []
+    let prompt: NativeChatMessage | undefined
+
+    if (isImageSourceUserTurn(message)) {
+      let nextIndex = index
+      while (
+        nextIndex < messages.length &&
+        messages[nextIndex]?.source === message.source &&
+        isImageSourceUserTurn(messages[nextIndex]!)
+      ) {
+        companions.push(messages[nextIndex]!)
+        nextIndex += 1
+      }
+      const candidate = messages[nextIndex]
+      if (
+        candidate?.role === 'user' &&
+        candidate.source === message.source &&
+        hasImagePromptMarker(candidate)
+      ) {
+        prompt = candidate
+        index = nextIndex
+      } else {
+        companions.length = 0
+      }
+    } else {
+      const candidate = messages[index + 1]
+      if (
+        message.role === 'user' &&
+        hasImagePromptMarker(message) &&
+        candidate?.source === message.source &&
+        candidate.timestamp === message.timestamp &&
+        isImageSourceUserTurn(candidate)
+      ) {
+        let nextIndex = index + 1
+        while (
+          nextIndex < messages.length &&
+          messages[nextIndex]?.source === message.source &&
+          messages[nextIndex]?.timestamp === message.timestamp &&
+          isImageSourceUserTurn(messages[nextIndex]!)
+        ) {
+          companions.push(messages[nextIndex]!)
+          nextIndex += 1
+        }
+        prompt = message
+        index = nextIndex - 1
+      }
+    }
+
+    const unitMessages = prompt ? [...companions, prompt] : [message]
+    units.push({ messages: unitMessages, sortKey: prompt ?? message })
+  }
+
+  units.sort((a, b) => compareMessages(a.sortKey, b.sortKey))
+  const sorted = units.flatMap((unit) => unit.messages)
+  return sorted.every((message, index) => message === messages[index]) ? messages : sorted
 }
 
 /**

@@ -6,6 +6,8 @@ import type {
   AgentSessionAttachResult,
   AgentSessionHistoryRequest,
   AgentSessionHistoryResult,
+  AgentSessionHandoffRequest,
+  AgentSessionHandoffResult,
   AgentSessionHandoffStatus,
   AgentSessionMutationResult,
   AgentSessionOptionsResult,
@@ -49,13 +51,18 @@ import {
   type StructuredAgentSessionMutationContext
 } from './structured-agent-session-host-mutations'
 import { StructuredAgentSessionReadableRestorer } from './structured-agent-session-readable-restorer'
+import { tearDownStructuredAgentSessionHost } from './structured-agent-session-host-teardown'
 import type {
   StructuredAgentSessionCaller,
   StructuredAgentSessionHostDeps,
   StructuredAgentSessionHostSession
 } from './structured-agent-session-host-types'
-import { readStructuredAgentSessionHistoryResult } from './structured-agent-session-history-result'
+import { StructuredAgentSessionEventRecovery } from './structured-agent-session-event-recovery'
+import { StructuredAgentSessionBackgroundTaskChannel } from './structured-agent-session-background-task-channel'
+import { withTimeout } from '../../../shared/promise-timeout-fallback'
 export type { StructuredAgentSessionHostDeps } from './structured-agent-session-host-types'
+/** Quit must not wait indefinitely on an in-flight handoff; see the drain phase below. */
+const HANDOFF_DRAIN_TIMEOUT_MS = 5_000
 
 export class StructuredAgentSessionHost {
   private readonly sessions = new Map<string, StructuredAgentSessionHostSession>()
@@ -67,8 +74,17 @@ export class StructuredAgentSessionHost {
   private readonly readableRestorer: StructuredAgentSessionReadableRestorer
   private readonly restartRestore = new StructuredAgentSessionRestartRestoreGate()
   private readonly holds: StructuredAgentSessionHolds
+  private readonly eventRecovery: StructuredAgentSessionEventRecovery
+  private readonly backgroundTasks: StructuredAgentSessionBackgroundTaskChannel
 
   constructor(readonly deps: StructuredAgentSessionHostDeps) {
+    this.backgroundTasks = new StructuredAgentSessionBackgroundTaskChannel(
+      deps,
+      this.sessions,
+      this.subscribers,
+      (sessionId) => this.requireSession(sessionId),
+      (sessionId) => this.handoffs.status(sessionId)
+    )
     this.runtimeState = new StructuredAgentSessionHostRuntimeState(
       deps,
       (record) => this.restoreRenewedHandoff(record.sessionId),
@@ -77,7 +93,8 @@ export class StructuredAgentSessionHost {
           ? this.serialize(record.sessionId, () =>
               this.handoffs.recoverDeadTuiOwner(record.sessionId, record.lease.runtimeFence, probe)
             )
-          : Promise.resolve()
+          : Promise.resolve(),
+      (sessionId, error) => this.eventRecovery.recoverAfterSinkFailure(sessionId, error)
     )
     this.reconcileLeases = createRestartReconciler({
       store: deps.store,
@@ -87,6 +104,7 @@ export class StructuredAgentSessionHost {
     })
     this.handoffs = createStructuredAgentSessionHostHandoff(deps, {
       session: (sessionId) => this.requireSession(sessionId),
+      findSession: (sessionId) => this.sessions.get(sessionId),
       eventSink: (sessionId) => this.runtimeState.eventSinkFor(sessionId),
       flush: (sessionId) => this.flushStreamedEvents(sessionId),
       serialize: (sessionId, task) => this.serialize(sessionId, task),
@@ -105,8 +123,23 @@ export class StructuredAgentSessionHost {
       resolveRecovery: (sessionId) => this.runtimeState.resolveRecovery(sessionId),
       serialize: (sessionId, task) => this.serialize(sessionId, task),
       hasSession: (sessionId) => this.sessions.has(sessionId),
+      // Site 10: cannot overwrite a live entry — the restorer returns early on
+      // `hasSession` inside the same serialized step as this `set`.
       onReadable: (sessionId, restored) => this.sessions.set(sessionId, restored),
       restoreHandoff: (sessionId) => this.handoffs.restore(sessionId)
+    })
+    this.eventRecovery = new StructuredAgentSessionEventRecovery({
+      deps,
+      store: deps.store,
+      sessions: this.sessions,
+      flushLifecycle: (sessionId) => this.runtimeState.lifecycleBarrier(sessionId),
+      publishFence: (sessionId, session) =>
+        this.subscribers.snapshot(sessionId, session.journal, session.fence),
+      hasResumeCapableHolder: (sessionId) => this.holds.hasResumeCapableHolder(sessionId),
+      serialize: (sessionId, task) => this.serialize(sessionId, task),
+      now: () => this.now(),
+      attachContext: () => this.attachContext(),
+      onBarrierError: (sessionId, error) => deps.onEventSinkError?.({ sessionId, error })
     })
     this.runtimeState.startLeaseRenewal()
   }
@@ -114,6 +147,7 @@ export class StructuredAgentSessionHost {
   private now = (): number => this.deps.now?.() ?? Date.now()
 
   hasSession = (sessionId: string): boolean => this.sessions.has(sessionId)
+  isHeld = (sessionId: string): boolean => this.holds.isHeld(sessionId)
 
   /** A surface bound to this session and wants it live. The FIRST hold on a session with no
    *  provider child is what resumes one; a retained hold (a subscription) only keeps it. */
@@ -125,8 +159,6 @@ export class StructuredAgentSessionHost {
 
   /** That surface is gone. The child outlives it by the release grace, and by any running turn. */
   release = (sessionId: string, holderId: string): void => this.holds.release(sessionId, holderId)
-
-  isHeld = (sessionId: string): boolean => this.holds.isHeld(sessionId)
 
   private async resumeForHold(sessionId: string): Promise<void> {
     const unreconciled = await this.reconcileLeases(sessionId)
@@ -141,6 +173,9 @@ export class StructuredAgentSessionHost {
       attach: (params) => this.attach({ callerKey: 'trusted-local:surface-hold' }, params)
     })
   }
+
+  handleAdapterEvent = (event: Parameters<StructuredAgentSessionEventRecovery['handle']>[0]) =>
+    this.eventRecovery.handle(event)
 
   private lifetimeContext(): StructuredAgentSessionLifetimeContext {
     return {
@@ -164,7 +199,6 @@ export class StructuredAgentSessionHost {
       now: () => this.now()
     }
   }
-
   /** Releases a session's resources without ending the conversation: the record and journal stay
    *  on disk, so the same session can be attached again. */
   close(sessionId: string): Promise<void> {
@@ -224,11 +258,25 @@ export class StructuredAgentSessionHost {
     this.runtimeState.flushEventSink(sessionId)
 
   async flushAllStreamedEvents(): Promise<void> {
-    this.holds.dispose()
-    this.runtimeState.stopLeaseRenewal()
-    this.handoffs.stopTuiHistoryCatchup()
-    await this.tasks.drainAttaches()
-    await this.runtimeState.flushAllEventSinks()
+    await tearDownStructuredAgentSessionHost({
+      phases: [
+        { name: 'dispose-holds', run: () => this.holds.dispose() },
+        { name: 'stop-lease-renewal', run: () => this.runtimeState.stopLeaseRenewal() },
+        { name: 'stop-tui-catchup', run: () => this.handoffs.stopTuiHistoryCatchup() },
+        // Before the session map is dropped: a handoff flow left running writes rows into a
+        // journal this teardown is about to close, and publishes against a session it removed.
+        // Why bounded: this phase is on the app-quit path, and a flow wedged in `launchTui` would
+        // otherwise hold the quit open forever. Giving up merely restores the old orphaning, which
+        // the publish guard above already makes survivable.
+        {
+          name: 'drain-handoffs',
+          run: () => withTimeout(this.handoffs.drain(), HANDOFF_DRAIN_TIMEOUT_MS, undefined)
+        },
+        { name: 'drain-attaches', run: () => this.tasks.drainAttaches() },
+        { name: 'flush-event-sinks', run: () => this.runtimeState.flushAllEventSinks() }
+      ],
+      sessions: this.sessions
+    })
   }
 
   private mutationContext(): StructuredAgentSessionMutationContext {
@@ -266,6 +314,12 @@ export class StructuredAgentSessionHost {
   ): ReturnType<typeof setStructuredAgentSessionOption> =>
     setStructuredAgentSessionOption(this.mutationContext(), caller, params)
 
+  requestHandoff = (
+    caller: StructuredAgentSessionCaller,
+    params: AgentSessionHandoffRequest
+  ): Promise<AgentSessionMutationResult<AgentSessionHandoffResult>> =>
+    this.handoffs.request(caller.callerKey, params)
+
   readOptions = (sessionId: string): Promise<AgentSessionOptionsResult> =>
     readStructuredAgentSessionOptions(this.mutationContext(), sessionId)
 
@@ -276,25 +330,16 @@ export class StructuredAgentSessionHost {
     )
   }
 
-  history(request: AgentSessionHistoryRequest): AgentSessionHistoryResult {
-    return readStructuredAgentSessionHistoryResult({
-      journal: this.requireSession(request.sessionId).journal,
-      record: this.deps.store.getRecord(request.sessionId),
-      request
-    })
-  }
+  history = (request: AgentSessionHistoryRequest): AgentSessionHistoryResult =>
+    this.backgroundTasks.history(request)
 
-  subscribe(input: AgentSessionSubscribeInput): () => void {
-    const session = this.requireSession(input.sessionId)
-    const fence = this.deps.store.getRecord(input.sessionId)?.lease.runtimeFence ?? 0
-    return this.subscribers.open({
-      ...input,
-      journal: session.journal,
-      fence,
-      handoff: this.handoffs.status(input.sessionId)
-    })
-  }
+  subscribe = (input: AgentSessionSubscribeInput): (() => void) =>
+    this.backgroundTasks.subscribe(input)
 
+  publishBackgroundTaskState: StructuredAgentSessionBackgroundTaskChannel['publish'] = (
+    sessionId,
+    state
+  ) => this.backgroundTasks.publish(sessionId, state)
   unsubscribe = (sessionId: string, id: string): void => this.subscribers.close(sessionId, id)
 
   private requireSession(sessionId: string): StructuredAgentSessionHostSession {
