@@ -95,6 +95,16 @@ describe('useOmpRpcCommands', () => {
     expect(hook.result.current).toBe(STATIC)
   })
 
+  it('falls back when the IPC call throws synchronously', async () => {
+    getCommands.mockImplementation(() => {
+      throw new Error('renderer released')
+    })
+    const hook = render('omp')
+
+    await waitFor(() => expect(getCommands).toHaveBeenCalled())
+    expect(hook.result.current).toBe(STATIC)
+  })
+
   it('never probes for a non-omp agent', () => {
     const hook = render('claude')
     expect(hook.result.current).toBe(STATIC)

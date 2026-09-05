@@ -48,22 +48,19 @@ const inFlight = new Map<string, Promise<OmpRpcSlashCommand[] | null>>()
 export function useOmpRpcProbeCwd(agent: AgentType | null, terminalTabId: string): string | null {
   const inputs = useAppStore(useShallow(selectNativeChatSkillStateInputs))
   const enabled = isOmpRpcCatalogAgent(agent)
-  return useMemo(
-    () => {
-      if (!enabled) {
-        return null
-      }
-      const context = resolveNativeChatSkillDiscoveryContext(inputs, terminalTabId)
-      // This IPC pool owns client-local children only. A remote runtime, SSH,
-      // or WSL pane must retain its terminal route until that host exposes its
-      // own RPC surface; a same-named local cwd is not an acceptable fallback.
-      if (!canUseLocalOmpRpcProbe(context)) {
-        return null
-      }
-      return context?.cwd ?? null
-    },
-    [enabled, inputs, terminalTabId]
-  )
+  return useMemo(() => {
+    if (!enabled) {
+      return null
+    }
+    const context = resolveNativeChatSkillDiscoveryContext(inputs, terminalTabId)
+    // This IPC pool owns client-local children only. A remote runtime, SSH,
+    // or WSL pane must retain its terminal route until that host exposes its
+    // own RPC surface; a same-named local cwd is not an acceptable fallback.
+    if (!canUseLocalOmpRpcProbe(context)) {
+      return null
+    }
+    return context?.cwd ?? null
+  }, [enabled, inputs, terminalTabId])
 }
 
 /** `sessionCommands` is the catalog the RPC child owning this pane published;
@@ -116,7 +113,8 @@ function loadOmpRpcCommands(cwd: string): Promise<OmpRpcSlashCommand[] | null> {
   if (existing) {
     return existing
   }
-  const request = Promise.resolve(window.api?.ompRpc?.getCommands({ cwd }))
+  const request = Promise.resolve()
+    .then(() => window.api?.ompRpc?.getCommands({ cwd }))
     .then((result) => {
       if (!result?.ok) {
         return null
@@ -154,8 +152,7 @@ export function useNativeChatComposerCommands(args: {
 }): { agentCommands: readonly SlashCommandSuggestion[]; ompRpcCwd: string | null } {
   const { agent, terminalTabId, structured, sessionCommands } = args
   const staticAgentCommands = useMemo(
-    () =>
-      structured ? structuredSlashCommands(agent) : getVerifiedNativeChatCommands(agent),
+    () => (structured ? structuredSlashCommands(agent) : getVerifiedNativeChatCommands(agent)),
     [agent, structured]
   )
   const agentCommands = useOmpRpcCommands(
