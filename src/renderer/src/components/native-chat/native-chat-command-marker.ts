@@ -4,6 +4,7 @@
 // optimistic-send pruning in native-chat-pending.ts, which is a separate rule.
 
 import type { NativeChatMessage } from '../../../../shared/native-chat-types'
+import { ompRpcCommandOutputDisplayText } from './omp-rpc-command-output-display'
 import { translate } from '@/i18n/i18n'
 import { setBoundedScopeCacheEntry } from './native-chat-composer-scope-cache'
 
@@ -145,8 +146,14 @@ function commandMarkerText(marker: NativeChatCommandMarker): string {
       command: marker.command
     })
   ]
-  if (marker.outputText?.trim()) {
-    parts.push(marker.outputText.trim())
+  // Same display-boundary rule as the overlay: the cache holds the raw capture
+  // so a colour sequence split across frames survives intact until here
+  // (omp-rpc-command-output-display.ts).
+  const outputText = marker.outputText
+    ? ompRpcCommandOutputDisplayText(marker.outputText).trim()
+    : ''
+  if (outputText) {
+    parts.push(outputText)
   }
   if (marker.outputTruncated) {
     parts.push(
