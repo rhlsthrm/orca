@@ -16,8 +16,11 @@ const TERMINAL_PANE_HOOK_SOURCE_PATTERN =
 // toggle in projection (208 hooks, still 8 useMemo).
 // Then chat-state's orchestration dispatch-status subscription went with the
 // paused notice that read it (207 hooks, still 8 useMemo).
+// Then the OMP RPC chat adapter moved chat-state's toggle bookkeeping into the
+// pane controller's RPC-ownership hook; the flattened order shifted but the
+// totals did not (still 207 hooks, 8 useMemo).
 const PRE_REFACTOR_HOOK_ORDER_SHA256 =
-  '2bbb42427b61e3722114ac37c407230cb7daffbf9b899090c7a635f15731ccad'
+  'b163ae0cf1d405d5c3394ca370deb2eb99fe5bb0ca904c46e07d2d70905ba335'
 
 const sourceFiles = readdirSync(__dirname)
   .filter((name) => TERMINAL_PANE_HOOK_SOURCE_PATTERN.test(name))
