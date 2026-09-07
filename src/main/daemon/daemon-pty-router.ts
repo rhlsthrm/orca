@@ -45,10 +45,7 @@ export class DaemonPtyRouter implements IPtyProvider {
 
   async spawn(opts: PtySpawnOptions): Promise<PtySpawnResult> {
     if (opts.attachOnly && opts.sessionId) {
-      return await this.ownerResolver.spawnAttachOnly({
-        ...opts,
-        sessionId: opts.sessionId
-      })
+      return await this.ownerResolver.spawnAttachOnly({ ...opts, sessionId: opts.sessionId })
     }
     const adapter = opts.sessionId ? this.sessionAdapters.get(opts.sessionId) : undefined
     const target = adapter ?? this.current
