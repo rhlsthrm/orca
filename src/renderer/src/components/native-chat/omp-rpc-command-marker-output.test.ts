@@ -16,6 +16,53 @@ beforeEach(() => {
   clearCommandMarkerCacheForTests()
 })
 
+const ESC = String.fromCharCode(27)
+// The shape `/usage` actually paints: truecolour SGR around each cell.
+const TRUECOLOUR_OPEN = `${ESC}[38;2;100;200;50m`
+const SGR_RESET = `${ESC}[0m`
+
+describe('command markers strip colour codes at the display boundary', () => {
+  it('renders the output colour-free', () => {
+    const markers = appendCommandMarkerCache(SCOPE, '/usage', 10, {
+      outputText: `${TRUECOLOUR_OPEN}Tokens: 120k${SGR_RESET}`,
+      agentInvoked: false
+    })
+
+    expect(textOf(commandMarkersAsMessages(markers))).toBe(
+      'Ran /usage\n\nTokens: 120k\n\nLocal command — agent not invoked'
+    )
+  })
+
+  it('leaves no colour-code digits behind', () => {
+    const markers = appendCommandMarkerCache(SCOPE, '/usage', 10, {
+      outputText: `${TRUECOLOUR_OPEN}Tokens: 120k${SGR_RESET}`,
+      agentInvoked: false
+    })
+
+    expect(textOf(commandMarkersAsMessages(markers))).not.toContain('38;2;')
+  })
+
+  it('keeps the raw capture in the cache so nothing is lost before projection', () => {
+    const markers = appendCommandMarkerCache(SCOPE, '/usage', 10, {
+      outputText: `${TRUECOLOUR_OPEN}Tokens: 120k${SGR_RESET}`,
+      agentInvoked: false
+    })
+
+    expect(markers[0].outputText).toBe(`${TRUECOLOUR_OPEN}Tokens: 120k${SGR_RESET}`)
+  })
+
+  it('renders no output paragraph when the capture is only colour codes', () => {
+    const markers = appendCommandMarkerCache(SCOPE, '/usage', 10, {
+      outputText: `${TRUECOLOUR_OPEN}${SGR_RESET}`,
+      agentInvoked: false
+    })
+
+    expect(textOf(commandMarkersAsMessages(markers))).toBe(
+      'Ran /usage\n\nLocal command — agent not invoked'
+    )
+  })
+})
+
 describe('command markers carrying RPC output', () => {
   it('renders the output and an explicit agent-not-invoked completion', () => {
     const markers = appendCommandMarkerCache(SCOPE, '/usage', 10, {

@@ -15,6 +15,7 @@ import {
   nativeChatWindowOmitsOlderRecords,
   type NativeChatTranscriptWindow
 } from './native-chat-pagination'
+import { ompRpcCommandOutputDisplayText } from './omp-rpc-command-output-display'
 import { ompRpcSubagentRosterText } from './omp-rpc-subagent-roster'
 import type { OmpRpcTurnState } from './omp-rpc-turn-reducer'
 
@@ -220,11 +221,15 @@ export function selectOmpRpcOverlayMessages(
       source: 'rpc'
     })
   }
-  if (state.commandOutputText.trim() && !state.commandInvokedAgent) {
+  // Stripped here, not in the reducer: state holds raw bytes so a colour
+  // sequence split across two frames is whole before it is stripped
+  // (omp-rpc-command-output-display.ts).
+  const commandOutputText = ompRpcCommandOutputDisplayText(state.commandOutputText)
+  if (commandOutputText.trim() && !state.commandInvokedAgent) {
     messages.push({
       id: OMP_RPC_COMMAND_OUTPUT_ID,
       role: 'system',
-      blocks: [{ type: 'text', text: state.commandOutputText }],
+      blocks: [{ type: 'text', text: commandOutputText }],
       timestamp: null,
       source: 'rpc'
     })
