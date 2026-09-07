@@ -66,6 +66,20 @@ describe('createOmpExecutableResolver', () => {
     expect(canExecute).not.toHaveBeenCalled()
   })
 
+<<<<<<< HEAD
+||||||| 8fa1b3c16c
+=======
+  it('returns the PATHEXT-resolved command shim on Windows', async () => {
+    const resolve = createOmpExecutableResolver(
+      makeDeps({
+        platform: 'win32',
+        resolveCommandOnPath: vi.fn(async () => 'C:\\Users\\u\\AppData\\Roaming\\npm\\omp.cmd')
+      })
+    )
+    await expect(resolve('omp')).resolves.toBe('C:\\Users\\u\\AppData\\Roaming\\npm\\omp.cmd')
+  })
+
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
   it('returns null when every strategy misses', async () => {
     const resolve = createOmpExecutableResolver(makeDeps())
     expect(await resolve('omp')).toBeNull()

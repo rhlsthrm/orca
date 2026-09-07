@@ -42,6 +42,7 @@ afterEach(() => {
   delete (window as unknown as { api?: unknown }).api
 })
 
+<<<<<<< HEAD
 function render(agent: string) {
   return renderHook(() => useOmpRpcCommands(agent, 'tab-1', STATIC))
 }
@@ -72,6 +73,66 @@ describe('useOmpRpcCommands', () => {
 
   it('falls back when the IPC call rejects outright', async () => {
     getCommands.mockRejectedValue(new Error('ipc down'))
+||||||| 8fa1b3c16c
+=======
+function render(agent: string, sessionCommands?: readonly { name: string }[] | null) {
+  return renderHook(() => useOmpRpcCommands(agent, 'tab-1', STATIC, sessionCommands))
+}
+
+describe('useOmpRpcCommands', () => {
+  it("shows the owning session's published catalog instead of the probe snapshot", async () => {
+    // The probe is cached per cwd for the app's life, so a command the session
+    // registered afterwards (reloaded plugin, new extension command) only ever
+    // reaches the `/` menu through the session's own available_commands_update.
+    getCommands.mockResolvedValue({ ok: true, commands: [{ name: 'stale-probe-entry' }] })
+    const hook = render('omp', [{ name: 'reloaded-skill' }])
+
+    await waitFor(() =>
+      expect(hook.result.current.map((command) => command.name)).toEqual([
+        'reloaded-skill',
+        'clear',
+        'help'
+      ])
+    )
+    expect(hook.result.current.map((command) => command.name)).not.toContain('stale-probe-entry')
+  })
+
+  it('merges the live OMP catalog over the static one', async () => {
+    getCommands.mockResolvedValue({
+      ok: true,
+      commands: [{ name: 'usage', description: 'Show account usage' }]
+    })
+    const hook = render('omp')
+
+    // First paint is the static catalog, so the `/` menu is never empty.
+    expect(hook.result.current).toBe(STATIC)
+    await waitFor(() =>
+      expect(hook.result.current.map((command) => command.name)).toEqual(['usage', 'clear', 'help'])
+    )
+    expect(getCommands).toHaveBeenCalledWith({ cwd: '/work/a' })
+  })
+
+  it('falls back to the static catalog when the probe fails', async () => {
+    getCommands.mockResolvedValue({ ok: false, errorCode: 'executable-not-found' })
+    const hook = render('omp')
+
+    await waitFor(() => expect(getCommands).toHaveBeenCalled())
+    expect(hook.result.current).toBe(STATIC)
+  })
+
+  it('falls back when the IPC call rejects outright', async () => {
+    getCommands.mockRejectedValue(new Error('ipc down'))
+    const hook = render('omp')
+
+    await waitFor(() => expect(getCommands).toHaveBeenCalled())
+    expect(hook.result.current).toBe(STATIC)
+  })
+
+  it('falls back when the IPC call throws synchronously', async () => {
+    getCommands.mockImplementation(() => {
+      throw new Error('renderer released')
+    })
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
     const hook = render('omp')
 
     await waitFor(() => expect(getCommands).toHaveBeenCalled())

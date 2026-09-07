@@ -68,10 +68,29 @@ export function resolveNativeChatSession(
  *  TerminalPane-anchored RPC ownership hook and kept sticky across the
  *  pane's later ptyId churn — `ompRpcChatOwnershipByPaneKey`); fall back to
  *  the hook value when no resolved identity exists yet, which keeps every
+<<<<<<< HEAD
  *  non-omp agent's existing behavior unchanged. */
 export function resolveEffectiveNativeChatSessionId(
   hookSessionId: string | null,
   resolvedOmpSessionId: string | null
 ): string | null {
   return resolvedOmpSessionId ?? hookSessionId
+||||||| 8fa1b3c16c
+=======
+ *  non-omp agent's existing behavior unchanged.
+ *
+ *  `publishedOmpSessionId` outranks both: it is `session.sessionId` as the RPC
+ *  child that owns the pane published it on `session_info_update`, so it is
+ *  ground truth about which session the pane is in. The on-disk resolver above
+ *  degrades to an mtime guess whenever no breadcrumb is available, and in a cwd
+ *  holding several sessions that guess can name the wrong transcript. Null
+ *  until a builtin republishes the session, so it never displaces a resolved
+ *  identity with "unknown". */
+export function resolveEffectiveNativeChatSessionId(
+  hookSessionId: string | null,
+  resolvedOmpSessionId: string | null,
+  publishedOmpSessionId: string | null = null
+): string | null {
+  return publishedOmpSessionId ?? resolvedOmpSessionId ?? hookSessionId
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
 }

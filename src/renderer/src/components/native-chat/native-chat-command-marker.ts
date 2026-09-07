@@ -4,6 +4,8 @@
 // optimistic-send pruning in native-chat-pending.ts, which is a separate rule.
 
 import type { NativeChatMessage } from '../../../../shared/native-chat-types'
+import { ompRpcCommandOutputDisplayText } from './omp-rpc-command-output-display'
+import { translate } from '@/i18n/i18n'
 import { setBoundedScopeCacheEntry } from './native-chat-composer-scope-cache'
 
 /** A locally-recorded slash command (e.g. `/clear`). Slash commands dispatch to
@@ -17,6 +19,12 @@ export type NativeChatCommandMarker = {
   /** Rendered output for commands Orca ran itself over RPC (OMP `/usage`).
    *  Absent for the PTY dispatch path, whose output lands in the TUI. */
   outputText?: string
+<<<<<<< HEAD
+||||||| 8fa1b3c16c
+=======
+  /** The collector hit its byte cap; rendered as a note under the output. */
+  outputTruncated?: boolean
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
   /** False when the command completed WITHOUT invoking the model. Only set on
    *  the RPC path, where the result frame states it; the marker then shows a
    *  completion note instead of implying an agent turn. */
@@ -69,9 +77,16 @@ export function appendCommandMarkerCache(
       sentAt,
       ...(outcome
         ? {
+<<<<<<< HEAD
             outputText: outcome.truncated
               ? `${outcome.outputText}\n\n${TRUNCATION_NOTE}`
               : outcome.outputText,
+||||||| 8fa1b3c16c
+    { id: `${sentAt}-${commandMarkerCounter}`, command, sentAt }
+=======
+            outputText: outcome.outputText,
+            ...(outcome.truncated ? { outputTruncated: true } : {}),
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
             agentInvoked: outcome.agentInvoked
           }
         : {})
@@ -141,6 +156,7 @@ export function commandMarkersAsMessages(
   }))
 }
 
+<<<<<<< HEAD
 function commandMarkerText(marker: NativeChatCommandMarker): string {
   const parts = [`Ran ${marker.command}`]
   if (marker.outputText?.trim()) {
@@ -148,6 +164,41 @@ function commandMarkerText(marker: NativeChatCommandMarker): string {
   }
   if (marker.agentInvoked === false) {
     parts.push(LOCAL_COMMAND_NOTE)
+||||||| 8fa1b3c16c
+=======
+/** Why translate here, not at append: markers are cached per pane and outlive
+ *  a locale switch, so the text is the render-time projection of the marker. */
+function commandMarkerText(marker: NativeChatCommandMarker): string {
+  const parts = [
+    translate('components.native-chat.commandMarker.ran', 'Ran {{command}}', {
+      command: marker.command
+    })
+  ]
+  // Same display-boundary rule as the overlay: the cache holds the raw capture
+  // so a colour sequence split across frames survives intact until here
+  // (omp-rpc-command-output-display.ts).
+  const outputText = marker.outputText
+    ? ompRpcCommandOutputDisplayText(marker.outputText).trim()
+    : ''
+  if (outputText) {
+    parts.push(outputText)
+  }
+  if (marker.outputTruncated) {
+    parts.push(
+      translate('components.native-chat.commandMarker.outputTruncated', '_Output truncated._')
+    )
+  }
+  // Why: `agentInvoked:false` is the wire's own statement that no model turn
+  // happened, so the marker says so explicitly rather than letting the output
+  // read as an assistant reply.
+  if (marker.agentInvoked === false) {
+    parts.push(
+      translate(
+        'components.native-chat.commandMarker.localCommandNote',
+        'Local command — agent not invoked'
+      )
+    )
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
   }
   return parts.join('\n\n')
 }

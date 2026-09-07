@@ -25,6 +25,13 @@ export function useNativeChatPickerCommandDispatch(args: {
   agent: AgentType
   /** Working directory keying the OMP RPC probe; null disables RPC routing. */
   ompRpcCwd?: string | null
+<<<<<<< HEAD
+||||||| 8fa1b3c16c
+=======
+  /** Sends a catalog command over the RPC session owning this pane; `false`
+   *  means it declined and the PTY path below still applies. */
+  sendOmpRpcCommand?: (text: string) => boolean
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
   disabled: boolean
   isDispatchingSessionOption: boolean
   resolveTarget: () => NativeChatResolvedTarget | null
@@ -42,6 +49,11 @@ export function useNativeChatPickerCommandDispatch(args: {
   const {
     agent,
     ompRpcCwd = null,
+<<<<<<< HEAD
+||||||| 8fa1b3c16c
+=======
+    sendOmpRpcCommand,
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
     disabled,
     isDispatchingSessionOption,
     resolveTarget,
@@ -62,6 +74,7 @@ export function useNativeChatPickerCommandDispatch(args: {
       if (disabled || isDispatchingSessionOption) {
         return
       }
+<<<<<<< HEAD
       // Why: picking `/usage` from the menu must behave exactly like typing it
       // — same RPC route, same rendered output, same PTY fallback. Checked
       // before resolving a PTY target: the RPC probe needs no live terminal
@@ -87,14 +100,76 @@ export function useNativeChatPickerCommandDispatch(args: {
         setCaret(0)
         setActiveSuggestion(0)
         clearSkillOrigin()
+||||||| 8fa1b3c16c
+=======
+      // Why: on an RPC-owned pane the PTY is gone by design, so a catalog
+      // command has to go through the owning session. Asked first, and before
+      // resolving a PTY target: only this call knows whether OMP's published
+      // catalog proves the session runs the command, and when it does that
+      // route beats the session-less probe below.
+      if (sendOmpRpcCommand?.(text)) {
+        emitNativeChatPickerItemAccepted({ agent, itemKind: 'command' })
+        emitNativeChatSendClassified({ agent, outcome: 'command' })
+        sessionOptionsSurface?.recordOutgoingCommand(text)
+        setHistory((previous) => pushHistory(previous, text))
+        setDraft('')
+        setCaret(0)
+        setActiveSuggestion(0)
+        clearSkillOrigin()
+        clearImageAttachments()
+        setNotice(null)
+        return
+      }
+      // Why: picking `/usage` from the menu must behave exactly like typing it
+      // — same RPC route, same rendered output, same fallback. The probe needs
+      // no live terminal (D1), so it also answers on a pane whose PTY is gone.
+      if (shouldRouteOmpLocalCommand(agent, text)) {
+        void runOmpLocalCommand(ompRpcCwd, text).then((outcome) => {
+          if (outcome) {
+            onSlashCommand?.(text, outcome)
+            return
+          }
+          const fallbackTarget = resolveTarget()
+          if (fallbackTarget) {
+            trackPendingSend(
+              sendNativeChatMessage(fallbackTarget.settings, fallbackTarget.ptyId, text)
+            )
+            onSlashCommand?.(text)
+            return
+          }
+          // Neither the probe nor a PTY could run it; saying nothing would drop
+          // the command silently now that the draft is already cleared.
+          setNotice(
+            translate(
+              'components.native-chat.composer.ompRpcLocalCommandUnavailable',
+              'This command could not be run: the agent connection did not answer and there is no live terminal.'
+            )
+          )
+        })
+        emitNativeChatPickerItemAccepted({ agent, itemKind: 'command' })
+        emitNativeChatSendClassified({ agent, outcome: 'command' })
+        setHistory((previous) => pushHistory(previous, text))
+        setDraft('')
+        setCaret(0)
+        setActiveSuggestion(0)
+        clearSkillOrigin()
+        clearImageAttachments()
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
         setNotice(null)
         return
       }
       const target = resolveTarget()
       if (!target) {
+<<<<<<< HEAD
         // Every other catalog command is PTY-routed; the RPC local-command
         // allowlist is `/usage`-only (widening it is open item 4). Say so
         // instead of silently dropping the picked command.
+||||||| 8fa1b3c16c
+      if (!target || disabled || isDispatchingSessionOption) {
+=======
+        // Nothing claimed the command and there is no terminal left: a PTY-only
+        // command on a pane whose RPC session also declined it.
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
         setNotice(
           translate(
             'components.native-chat.composer.commandRequiresPty',
@@ -136,6 +211,7 @@ export function useNativeChatPickerCommandDispatch(args: {
       ompRpcCwd,
       onSlashCommand,
       resolveTarget,
+      sendOmpRpcCommand,
       sessionOptionsSurface,
       setActiveSuggestion,
       setCaret,

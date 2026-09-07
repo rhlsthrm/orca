@@ -413,4 +413,55 @@ describe('readNativeChatTranscriptTailFile', () => {
       ['assistant', 'Second reply']
     ])
   })
+<<<<<<< HEAD
+||||||| 8fa1b3c16c
+=======
+
+  it('keeps a split record whole at the page boundary instead of orphaning its reasoning', async () => {
+    const decode = nativeChatLineDecoderForAgent('omp')!
+    const filePath = await writeFixture('orca-native-chat-omp-tail-page-boundary-', [
+      {
+        type: 'message',
+        id: 'rec-1',
+        timestamp: '2026-06-01T10:00:00.000Z',
+        message: { role: 'user', content: [{ type: 'text', text: 'go' }] }
+      },
+      {
+        type: 'message',
+        id: 'rec-2',
+        timestamp: '2026-06-01T10:00:01.000Z',
+        message: {
+          role: 'assistant',
+          content: [
+            { type: 'thinking', thinking: 'Think' },
+            { type: 'text', text: 'Reply' }
+          ]
+        }
+      },
+      {
+        type: 'message',
+        id: 'rec-3',
+        timestamp: '2026-06-01T10:00:02.000Z',
+        message: { role: 'user', content: [{ type: 'text', text: 'again' }] }
+      }
+    ])
+
+    // A hard limit of 2 would cut between 'Think' and 'Reply'. The record is
+    // one line on disk, so `beforeOffset` would then point at that same line
+    // and the next page would hand 'Reply' back a second time.
+    const page = await readNativeChatTranscriptTailFile(filePath, 2, decode, true)
+    expect(page.messages.map((m) => m.role)).toEqual(['reasoning', 'assistant', 'user'])
+    expect(page.hasMore).toBe(true)
+
+    const earlier = await readNativeChatTranscriptTailFile(
+      filePath,
+      2,
+      decode,
+      true,
+      page.beforeOffset
+    )
+    expect(earlier.messages.map((m) => m.role)).toEqual(['user'])
+    expect(earlier.hasMore).toBe(false)
+  })
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
 })

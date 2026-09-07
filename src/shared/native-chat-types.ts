@@ -37,6 +37,17 @@ export type NativeChatRole = (typeof NATIVE_CHAT_ROLES)[number]
 export type NativeChatTextBlock = {
   type: 'text'
   text: string
+  /** Optional structured detail for an otherwise ordinary fallback line. */
+  providerFrame?: {
+    provider: string
+    kind: string
+    payload: {
+      head: string
+      byteLength: number
+      digest: string
+      truncated: boolean
+    }
+  }
 }
 
 /** A tool invocation by the agent. `input` is the (already-serialized) tool
@@ -48,7 +59,32 @@ export type NativeChatToolCallBlock = {
   type: 'tool-call'
   name: string
   input: unknown
+<<<<<<< HEAD
   toolCallId?: string
+||||||| 8fa1b3c16c
+=======
+  /** Provider lifecycle when the structured app-server path can supply it. */
+  state?: 'running' | 'completed' | 'failed'
+  toolCallId?: string
+}
+
+/** One resolved hunk from a provider's edit result, carrying true file ranges. */
+export type NativeChatEditPatchHunk = {
+  oldStart: number
+  oldLines: number
+  newStart: number
+  newLines: number
+  /** Signed unified rows, as the provider emitted them. */
+  lines: string[]
+}
+
+/** Hunks the provider resolved against the real file before reporting the edit.
+ *  Claude supplies these on its edit results; Codex resolves equivalently before
+ *  sending, so its patch already carries ranges and needs no companion. */
+export type NativeChatEditPatch = {
+  filePath?: string
+  hunks: NativeChatEditPatchHunk[]
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
 }
 
 /** The result returned to the agent for a prior tool call. */
@@ -56,6 +92,12 @@ export type NativeChatToolResultBlock = {
   type: 'tool-result'
   output: string
   isError?: boolean
+<<<<<<< HEAD
+||||||| 8fa1b3c16c
+=======
+  /** Present only for edit tools whose result reported resolved hunks. */
+  editPatch?: NativeChatEditPatch
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
   toolCallId?: string
 }
 
@@ -84,10 +126,34 @@ export type NativeChatMessage = {
    *  supply one (e.g. some scrape segments). Null sorts before any timestamp. */
   timestamp: number | null
   source: NativeChatSource
+  /** The clock the AGENT put on the message, when a source recovered one.
+   *  Distinct from `timestamp`, which for a transcript record is the envelope's
+   *  own write time — stamped when the line was persisted, seconds after the
+   *  message it wraps. Only this reading is comparable across sources, so it is
+   *  what cross-source record identity keys on
+   *  (native-chat-rpc-history-merge.ts). Never rendered. */
+  originTimestamp?: number
   /** Optional explicit turn key. When present, two messages with the same
    *  `turnId` are treated as the same turn for dedup regardless of `id`. */
   turnId?: string
 }
+
+/** The window the runtime RPC applies when a client subscribes without a
+ *  `limit` (`nativeChat.readSession` / `nativeChat.subscribeSession`). Shared so
+ *  the client bridges grade an omitted-limit read against the window the host
+ *  actually used: a runtime too old to send `hasMore` leaves only the exact fill
+ *  to infer from (SA-011), and inferring against the wrong window turns a full
+ *  page into a false transcript head (SA-014). */
+export const NATIVE_CHAT_REMOTE_DEFAULT_WINDOW = 40
+
+/** The widest window the runtime RPC will read, and the widest `limit` a client
+ *  may ask for. Shared with the renderer's pagination (XLR-049) because it is a
+ *  WIRE constant, not a host implementation detail: runtimes that predate the
+ *  host-side clamp validated this same bound with a hard rejection, so a client
+ *  that pages past it gets its read refused outright and stalls "load earlier"
+ *  at the boundary with the oldest records unreachable. Growing the client's
+ *  limit only up to here keeps every request acceptable to both. */
+export const NATIVE_CHAT_REMOTE_MAX_WINDOW = 2000
 
 export const NATIVE_CHAT_TURN_LIFECYCLE_STATES = ['working', 'completed', 'interrupted'] as const
 export type NativeChatTurnLifecycleState = (typeof NATIVE_CHAT_TURN_LIFECYCLE_STATES)[number]

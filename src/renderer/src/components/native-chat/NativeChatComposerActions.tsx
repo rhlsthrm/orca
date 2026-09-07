@@ -7,6 +7,8 @@ import type {
   SessionOptionsSurface
 } from '../../../../shared/native-chat-session-options'
 import { NativeChatSessionOptionPickers } from './NativeChatSessionOptionPickers'
+import type { NativeChatOptionPickerRequest } from './native-chat-composer-types'
+import type { NativeChatComposerFollowUp } from './use-native-chat-composer-omp-rpc-send'
 
 export type NativeChatComposerActionsProps = {
   attachDisabled: boolean
@@ -23,9 +25,15 @@ export type NativeChatComposerActionsProps = {
   onStop?: () => void
   sessionOptionsSurface: SessionOptionsSurface | null
   sessionOptionsSnapshot: SessionOptionDescriptor[]
+<<<<<<< HEAD
   /** RPC "Follow up" affordance (D6/W2-5): present only while an RPC-owned
    *  pane's turn is streaming; null hides the toggle entirely. */
   followUp?: { active: boolean; onToggle: () => void } | null
+||||||| 8fa1b3c16c
+=======
+  sessionOptionsPickerRequest?: NativeChatOptionPickerRequest | null
+  followUp?: NativeChatComposerFollowUp | null
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
 }
 
 export function NativeChatComposerActions({
@@ -43,8 +51,26 @@ export function NativeChatComposerActions({
   onStop,
   sessionOptionsSurface,
   sessionOptionsSnapshot,
+<<<<<<< HEAD
+||||||| 8fa1b3c16c
+  sessionOptionsSnapshot
+=======
+  sessionOptionsPickerRequest,
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
   followUp = null
 }: NativeChatComposerActionsProps): React.JSX.Element {
+  const handleCriticalAction = (event: React.MouseEvent<HTMLButtonElement>): void => {
+    // A double-click commonly lands after the first send has started and the button has
+    // changed to Stop; ignore the second click instead of cancelling the new turn.
+    if (event.detail > 1) {
+      return
+    }
+    if (isWorking) {
+      onStop?.()
+    } else {
+      onSend()
+    }
+  }
   const dictationLabel = isDictating
     ? translate('components.native-chat.composer.stopDictation', 'Stop dictation')
     : translate('components.native-chat.composer.startDictation', 'Start dictation')
@@ -77,6 +103,7 @@ export function NativeChatComposerActions({
           surface={sessionOptionsSurface}
           snapshot={sessionOptionsSnapshot}
           isWorking={isWorking}
+          pickerRequest={sessionOptionsPickerRequest}
         />
         <Tooltip>
           <TooltipTrigger asChild>
@@ -135,13 +162,14 @@ export function NativeChatComposerActions({
         ) : null}
         <Button
           type="button"
+          data-native-chat-critical-action={isWorking ? 'stop' : undefined}
           aria-label={
             isWorking
               ? translate('components.native-chat.stop', 'Stop the agent')
               : translate('components.native-chat.composer.send', 'Send')
           }
           disabled={sendDisabled}
-          onClick={isWorking ? onStop : onSend}
+          onClick={handleCriticalAction}
           variant={isWorking ? 'secondary' : 'default'}
           size="icon"
           className="size-8 rounded-full pointer-coarse:size-10"

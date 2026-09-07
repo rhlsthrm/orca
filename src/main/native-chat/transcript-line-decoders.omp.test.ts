@@ -171,6 +171,125 @@ describe('decodeOmpTranscriptLine', () => {
     expect(decoded?.blocks).toEqual([{ type: 'text', text: 'peer said hi' }])
   })
 
+  it('renders an advisor card as an attributed advisor row, not raw advisory XML', () => {
+    const decoded = decodeOmpTranscriptLine(
+      line({
+        type: 'custom_message',
+        id: 'rec-adv',
+        customType: 'advisor',
+        display: true,
+        attribution: 'agent',
+        timestamp: '2026-07-16T00:27:02.222Z',
+        content:
+          '<advisory advisor="Architecture" severity="concern" guidance="weigh, don\'t blindly obey">\nWatch the coupling.\n</advisory>',
+        details: {
+          notes: [{ note: 'Watch the coupling.', severity: 'concern', advisor: 'Architecture' }]
+        }
+      }),
+      'f'
+    )
+    expect(decoded).toEqual({
+      id: 'rec-adv',
+      role: 'system',
+      blocks: [
+        {
+          type: 'text',
+          text: '\u203b advisor \u00b7 Architecture \u00b7 concern\nWatch the coupling.'
+        }
+      ],
+      timestamp: Date.parse('2026-07-16T00:27:02.222Z'),
+      source: 'transcript',
+      turnId: `omp-advisor:${Date.parse('2026-07-16T00:27:02.222Z')}:Architecture/concern/Watch the coupling.`
+    })
+  })
+
+  it('decodes an advisor card that carries only the advisory XML', () => {
+    const decoded = decodeOmpTranscriptLine(
+      line({
+        type: 'custom_message',
+        id: 'rec-adv2',
+        customType: 'advisor',
+        display: true,
+        content: '<advisory severity="nit" guidance="x">\nTrim the dead import.\n</advisory>'
+      }),
+      'f'
+    )
+    expect(decoded?.blocks).toEqual([
+      { type: 'text', text: '\u203b advisor \u00b7 nit\nTrim the dead import.' }
+    ])
+    expect(decoded?.turnId).toBe('omp-advisor::/nit/Trim the dead import.')
+  })
+
+  it('hides a state-only advisor card exactly like any other custom_message', () => {
+    expect(
+      decodeOmpTranscriptLine(
+        line({
+          type: 'custom_message',
+          id: 'rec-adv3',
+          customType: 'advisor',
+          display: false,
+          details: { notes: [{ note: 'hidden' }] }
+        }),
+        'f'
+      )
+    ).toBeNull()
+  })
+
+  // The hydrated `get_messages_page` path re-wraps a bare AgentMessage as
+  // `type:'message'`, so an advisor card reaches the decoder through this
+  // branch and must resolve to the same turn identity as its on-disk twin.
+  it('gives a bare-AgentMessage advisor card the same turn identity as the persisted row', () => {
+    // SessionManager.appendCustomMessageEntry stamps the entry with the
+    // CustomMessage's OWN timestamp, so the persisted envelope clock and the
+    // bare message clock are the same instant in two encodings.
+    const persisted = decodeOmpTranscriptLine(
+      line({
+        type: 'custom_message',
+        id: 'rec-adv4',
+        customType: 'advisor',
+        display: true,
+        timestamp: '2026-07-16T00:27:02.222Z',
+        details: { notes: [{ note: 'Stay silent.', severity: 'nit' }] }
+      }),
+      'f'
+    )
+    const hydrated = decodeOmpTranscriptLine(
+      line({
+        type: 'message',
+        id: 'hist-4',
+        timestamp: Date.parse('2026-07-16T00:27:02.222Z'),
+        message: {
+          role: 'custom',
+          customType: 'advisor',
+          display: true,
+          timestamp: Date.parse('2026-07-16T00:27:02.222Z'),
+          content: '<advisory severity="nit" guidance="x">\nStay silent.\n</advisory>'
+        }
+      }),
+      'f'
+    )
+    expect(hydrated?.turnId).toBe(persisted?.turnId)
+    expect(hydrated?.blocks).toEqual(persisted?.blocks)
+  })
+
+  // Advisor cards carry no id, so two runs of identical advice would collide
+  // on a content-only identity and the newer card would be suppressed by the
+  // older card's transcript row.
+  it('separates two identical advisor cards persisted at different instants', () => {
+    const advisorRow = (id: string, timestamp: string): string =>
+      line({
+        type: 'custom_message',
+        id,
+        customType: 'advisor',
+        display: true,
+        timestamp,
+        details: { notes: [{ note: 'Stay silent.', severity: 'nit' }] }
+      })
+    const first = decodeOmpTranscriptLine(advisorRow('rec-adv5', '2026-07-16T00:27:02.222Z'), 'f')
+    const second = decodeOmpTranscriptLine(advisorRow('rec-adv6', '2026-07-16T01:02:03.000Z'), 'f')
+    expect(first?.turnId).not.toBe(second?.turnId)
+  })
+
   it('renders a bash execution cell as a tool turn', () => {
     const decoded = decodeOmpTranscriptLine(
       line({

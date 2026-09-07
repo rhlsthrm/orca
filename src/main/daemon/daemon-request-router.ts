@@ -101,12 +101,23 @@ export class DaemonRequestRouter {
         return {}
       case 'getCwd':
         return { cwd: await this.options.host.getCwd(request.payload.sessionId) }
+      case 'getSlavePath':
+        return { slavePath: this.options.host.getSlavePath(request.payload.sessionId) }
       case 'getForegroundProcess':
         return {
           foregroundProcess: this.options.host.getForegroundProcess(request.payload.sessionId)
         }
-      case 'inspectProcess':
-        return this.options.host.inspectProcess(request.payload.sessionId)
+      case 'inspectProcess': {
+        const options = {
+          ...(request.payload.expectedIncarnationId
+            ? { expectedIncarnationId: request.payload.expectedIncarnationId }
+            : {}),
+          ...(request.payload.steadyState === true ? { steadyState: true } : {})
+        }
+        return Object.keys(options).length > 0
+          ? this.options.host.inspectProcess(request.payload.sessionId, options)
+          : this.options.host.inspectProcess(request.payload.sessionId)
+      }
       case 'confirmForegroundProcess':
         return {
           foregroundProcess: await this.options.host.confirmForegroundProcess(
@@ -238,16 +249,18 @@ export class DaemonRequestRouter {
     clientId: string,
     requestId: string,
     killSessions: boolean
-  ): Promise<Record<string, never>> {
+  ): Promise<{ physicalPtyExitVerified: boolean }> {
     this.options.log.log('shutdown', {
       reason: 'rpc',
       killSessions: killSessions === true
     })
     const serverClose = this.options.lifecycle.beginOrdinaryShutdownFence()
+    let physicalPtyExitVerified = true
     if (killSessions) {
       try {
         await this.options.host.dispose()
       } catch (error) {
+        physicalPtyExitVerified = false
         this.options.log.log('shutdown-dispose-failed', {
           error: error instanceof Error ? error.message : String(error)
         })
@@ -264,7 +277,7 @@ export class DaemonRequestRouter {
     } else {
       this.options.lifecycle.finishRpcShutdownWithoutReply(serverClose)
     }
-    return {}
+    return { physicalPtyExitVerified }
   }
 
   private sendExitEvent(

@@ -1,6 +1,8 @@
 import { describe, it, expect } from 'vitest'
 import type { NativeChatMessage } from '../../../../shared/native-chat-types'
+import { ompAdvisorNotesText, ompAdvisorTurnId } from '../../../../shared/omp-advisor-notes'
 import { assembleNativeChatSession } from './native-chat-session-assembler'
+import { OMP_RPC_ADVISOR_ID_PREFIX } from './omp-rpc-turn-overlay'
 
 function msg(
   overrides: Partial<NativeChatMessage> & Pick<NativeChatMessage, 'id'>
@@ -110,6 +112,121 @@ describe('assembleNativeChatSession', () => {
       { type: 'image-ref', path: '/Users/me/Downloads/3d.png' },
       { type: 'text', text: 'what do you see' }
     ])
+  })
+
+  it('folds equal-timestamp image companions before UUID ordering can split them', () => {
+    const prompt = msg({
+      id: 'a-prompt',
+      role: 'user',
+      timestamp: 100,
+      blocks: [{ type: 'text', text: '[Image #1] what do you see' }]
+    })
+    const companion = msg({
+      id: 'z-companion',
+      role: 'user',
+      timestamp: 100,
+      blocks: [{ type: 'text', text: '[Image: source: /tmp/3d.png]' }]
+    })
+
+    const session = assembleNativeChatSession({
+      // Arrival order is intentionally reversed; UUID order would be wrong too.
+      sources: { transcript: [prompt, companion] },
+      sessionId: 's1',
+      agent: 'claude'
+    })
+
+    expect(session.messages).toHaveLength(1)
+    expect(session.messages[0]).toMatchObject({ id: 'a-prompt', role: 'user' })
+    expect(session.messages[0]?.blocks).toEqual([
+      { type: 'image-ref', path: '/tmp/3d.png' },
+      { type: 'text', text: 'what do you see' }
+    ])
+  })
+
+  it('keeps distinct equal-timestamp image companions with their adjacent prompts', () => {
+    const firstPrompt = msg({
+      id: 'a-first-prompt',
+      role: 'user',
+      timestamp: 100,
+      blocks: [{ type: 'text', text: '[Image #1] inspect the first' }]
+    })
+    const firstCompanion = msg({
+      id: 'z-first-companion',
+      role: 'user',
+      timestamp: 100,
+      blocks: [{ type: 'text', text: '[Image: source: /tmp/first.png]' }]
+    })
+    const secondPrompt = msg({
+      id: 'b-second-prompt',
+      role: 'user',
+      timestamp: 100,
+      blocks: [{ type: 'text', text: '[Image #1] inspect the second' }]
+    })
+    const secondCompanion = msg({
+      id: 'y-second-companion',
+      role: 'user',
+      timestamp: 100,
+      blocks: [{ type: 'text', text: '[Image: source: /tmp/second.png]' }]
+    })
+
+    const session = assembleNativeChatSession({
+      sources: {
+        transcript: [firstPrompt, firstCompanion, secondPrompt, secondCompanion]
+      },
+      sessionId: 's1',
+      agent: 'claude'
+    })
+
+    expect(session.messages).toEqual([
+      {
+        ...firstPrompt,
+        blocks: [
+          { type: 'image-ref', path: '/tmp/first.png' },
+          { type: 'text', text: 'inspect the first' }
+        ]
+      },
+      {
+        ...secondPrompt,
+        blocks: [
+          { type: 'image-ref', path: '/tmp/second.png' },
+          { type: 'text', text: 'inspect the second' }
+        ]
+      }
+    ])
+  })
+
+  it('does not move an equal-timestamp companion across an unrelated row', () => {
+    const prompt = msg({
+      id: 'a-prompt',
+      role: 'user',
+      timestamp: 100,
+      blocks: [{ type: 'text', text: '[Image #1] inspect this' }]
+    })
+    const unrelated = msg({
+      id: 'm-answer',
+      timestamp: 100,
+      blocks: [{ type: 'text', text: 'unrelated' }]
+    })
+    const companion = msg({
+      id: 'z-companion',
+      role: 'user',
+      timestamp: 100,
+      blocks: [{ type: 'text', text: '[Image: source: /tmp/image.png]' }]
+    })
+
+    const session = assembleNativeChatSession({
+      sources: { transcript: [prompt, unrelated, companion] },
+      sessionId: 's1',
+      agent: 'claude'
+    })
+
+    expect(session.messages.map((message) => message.id)).toEqual([
+      'a-prompt',
+      'm-answer',
+      'z-companion'
+    ])
+    expect(session.messages[0]?.blocks).toEqual([{ type: 'text', text: 'inspect this' }])
+    expect(session.messages[2]?.blocks).toEqual([{ type: 'image-ref', path: '/tmp/image.png' }])
   })
 
   it('merges Claude image source markers into a trailing-marker prompt', () => {
@@ -296,5 +413,70 @@ describe('assembleNativeChatSession', () => {
     })
     expect(session.status).toBe('error')
     expect(session.error).toBe('transcript unreadable')
+  })
+})
+
+// An OMP advisor note reaches the pane twice: live, off the RPC
+// `message_end` frame, and again as the transcript's own
+// `customType:'advisor'` entry. Neither carrier supplies an id the other
+// shares, so `ompAdvisorTurnId` is the identity that collapses them.
+describe('assembleNativeChatSession — OMP advisor cards', () => {
+  const notes = [
+    { note: 'Watch the coupling.', severity: 'concern' as const, advisor: 'Architecture' }
+  ]
+  const advisorTurnId = ompAdvisorTurnId(notes, 1_700_000_000_000) as string
+  const advisorText = ompAdvisorNotesText(notes)
+
+  it('collapses the live RPC advisor row onto its transcript copy', () => {
+    const overlay = msg({
+      id: `${OMP_RPC_ADVISOR_ID_PREFIX}live`,
+      role: 'system',
+      source: 'rpc',
+      turnId: advisorTurnId,
+      blocks: [{ type: 'text', text: advisorText }],
+      timestamp: 1_700_000_000_000
+    })
+    const transcript = msg({
+      id: 'rec-adv',
+      role: 'system',
+      source: 'transcript',
+      turnId: advisorTurnId,
+      blocks: [{ type: 'text', text: advisorText }],
+      timestamp: 1_700_000_000_000
+    })
+
+    const session = assembleNativeChatSession({
+      sources: { transcript: [transcript], rpc: [overlay] },
+      sessionId: 's1',
+      agent: 'omp'
+    })
+
+    expect(session.messages).toHaveLength(1)
+    expect(session.messages[0].id).toBe('rec-adv')
+    expect(session.messages[0].source).toBe('transcript')
+  })
+
+  it('keeps two advisors raising the same text as separate rows', () => {
+    const fixerNotes = [
+      { note: 'Watch the coupling.', severity: 'concern' as const, advisor: 'Fixer' }
+    ]
+    const rows = [notes, fixerNotes].map((batch, index) =>
+      msg({
+        id: `rec-adv-${index}`,
+        role: 'system',
+        source: 'transcript',
+        turnId: ompAdvisorTurnId(batch, 1_700_000_000_000 + index) as string,
+        blocks: [{ type: 'text', text: ompAdvisorNotesText(batch) }],
+        timestamp: 1_700_000_000_000 + index
+      })
+    )
+
+    const session = assembleNativeChatSession({
+      sources: { transcript: rows },
+      sessionId: 's1',
+      agent: 'omp'
+    })
+
+    expect(session.messages.map((message) => message.id)).toEqual(['rec-adv-0', 'rec-adv-1'])
   })
 })

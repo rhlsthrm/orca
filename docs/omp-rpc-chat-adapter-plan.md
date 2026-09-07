@@ -74,6 +74,7 @@ Note: commits are listed in dependency order, not `git log` order.
 
 - `ready` frame advertises `protocolVersion: 1`, `supportedProtocolVersions: [1, 2]`,
   `maxFrameBytes: 1048576`, `maxReassembledFrameBytes: 67108864`. v2 negotiation succeeds.
+<<<<<<< HEAD
 - Command catalog returns 487–494 entries, including user-defined `/skill:*` commands.
 - `prompt {message:"/usage"}` emits `command_output` frames, then a response carrying
   `data.agentInvoked: false`. Local commands must therefore **never** synthesize an
@@ -493,6 +494,434 @@ Note: commits are listed in dependency order, not `git log` order.
   explicitly forbids it) — inventing one would misattribute content to a fabricated
   source. If the recap is ever wanted in Orca's chat, it needs a *new* OMP-side surface
   (e.g. a dedicated frame type, or a transcript record), not a client-side workaround.
+||||||| 8fa1b3c16c
+=======
+  Those two byte counts are the SERVER's framing envelope, not constants of ours: the
+  client validates only their shape (positive integers, reassembled ≥ frame) and sizes its
+  chunk reassembler and stdout line cap from the advertised values, so an OMP release that
+  ships a different budget is adopted rather than rejected as "not a ready frame".
+- Command catalog returns 487–494 entries, including user-defined `/skill:*` commands.
+- `prompt {message:"/usage"}` emits `command_output` frames, then a response carrying
+  `data.agentInvoked: false`. Local commands must therefore **never** synthesize an
+  assistant turn.
+- v2 chunking is strictly in-order: one pending sequence, must start at index 0,
+  `count >= 2`, per-chunk payload ≤256KiB, total `byteLength` ≥`maxFrameBytes` and
+  ≤`maxReassembledFrameBytes` (the advertised envelope), exact byte-length match on
+  completion. Deviations are protocol faults to surface, not tolerate — do not add an
+  out-of-order/dedupe reassembler.
+- Tool approval has **no dedicated frame**. It arrives as `extension_ui_request` with
+  `method: "select"`, a free-text prompt, and Approve/Deny options.
+- OMP has **no checkpoint verb**. Continuity is only `switch_session {sessionPath}` and
+  `new_session {parentSession?}`, so checkpointing is a host-side convention.
+- **`switch_session` requires the absolute session-file path, not the bare session id**
+  (live-probed twice, omp 18.0.6, wave 3 / F12). Passing a bare id does **not** error — it
+  silently fails to switch, and only a follow-up `get_state` reveals the session never
+  changed (`sessionFile mismatch after switch`). This is the opposite of the CLI, whose
+  `--resume` *does* accept a bare id; the two mechanisms are not interchangeable and
+  conflating them was a real latent bug. Acquisition now resolves the real path via
+  `resolveSessionFilePath('omp', …)` before switching, while the bare id remains the claim
+  identity key. The env-gated probe that proves this lives in `omp-rpc-live.test.ts`.
+- **Terminal-scoped breadcrumbs (`~/.omp/agent/terminal-sessions/<terminal-id>`) exist
+  and are keyed by the plain basename of the pane's tty slave device path** — real files
+  observed on this machine are named e.g. `ttys000`, matching `basename('/dev/ttys000')`,
+  not any Orca-set env var (Orca sets `ORCA_PANE_KEY`/`ORCA_TAB_ID`, not one of OMP's
+  recognized fallback identifiers `CMUX_SURFACE_ID`/`TMUX_PANE`/`TERM_SESSION_ID`/
+  `WT_SESSION`, so OMP always falls through to the TTY path for an Orca-spawned pane).
+  Content is `<cwd>\n<sessionFilePath>\n[fresh]` — a missing second line is only a
+  legitimate non-stale state when the third line is `fresh` (a lazily-unmaterialized
+  `/new` boundary), matching `continueRecent()`'s own documented validation rule
+  (omp://session-switching-and-recent-listing.md).
+- **No existing repo code computed OMP's session-directory cwd-encoding** before wave 4
+  (`-<relative>` under home, `-tmp-<relative>` under the temp root, `--<encoded-absolute>--`
+  otherwise) — `omp-terminal-session-identity.ts`'s `encodeOmpSessionCwdBucket` is a fresh
+  implementation of the documented rule, verified against the real observed bucket name
+  `-dev-projects-orca` for this repo's own checkout. The `--<encoded-absolute>--` case has
+  no real-world example available to verify against; it is implemented per the literal
+  spec and is only ever a fallback heuristic behind existence verification (see the trap
+  below), so a wrong guess there degrades to "no candidate found," never a wrong write.
+- **OMP does have a history-fetch verb — Orca's typed `OmpRpcCommand` union just doesn't
+  include it yet.** `omp://rpc.md:188-193` documents `get_messages` and
+  `get_messages_page` (cursor-paginated, returning `messages`/`totalMessages`/
+  `nextCursor`, with machine-readable `session_busy` and `stale_cursor` error codes). A
+  third-lab review (wave 6) asserted otherwise and concluded replace was therefore not a
+  coherent alternative to overlay; that specific premise was wrong, but the overlay
+  decision still stands, on better grounds: (a) D1 requires the transcript reader to stay
+  alive regardless, so replace would *add* a history source rather than remove one; (b)
+  `get_messages_page` explicitly refuses to page while the session is streaming or
+  compacting, so it cannot serve live rendering precisely when the UI needs it most; (c)
+  overlay bounds the id-less reconciliation (D4) to one in-flight turn instead of forever.
+  `get_messages_page` is the likely mechanism for the deferred SSH/remote item (open item
+  6) — a remote pane has no local transcript to overlay onto, which is exactly why the
+  feature is local-only gated today. Not implemented this wave.
+- **The recap never crosses the RPC wire (wave 7, live-probed).** A one-shot
+  probe (`src/main/omp-rpc/omp-rpc-live-recap-probe.test.ts`,
+  `ORCA_OMP_RPC_LIVE=1`) sent one trivial prompt over a session-owning client
+  with the advisor active and dumped every frame, verbatim, from a complete
+  real turn (18 frames total: `ready`, `commands` x3, `agent-start`,
+  `turn-start`, `message-start`/`message-update` x3/`message-end` x2,
+  `turn-end`, `agent-end`, two `extension_ui_request{method:'setWidget',
+  widgetKey:'autoresearch'}` frames, and one `advisor_cost_changed` frame —
+  the same event wave 1 observed live). Neither `recap` nor `※` appears
+  anywhere in the dump outside one unrelated substring match inside the
+  command catalog (a skill literally named
+  `skill:aethos-staging-recapture-retrieval`). This settles UAT's bug 2b: the
+  recap is TUI-rendered and never written to the transcript, the advisor
+  file, or the RPC wire — see the Traps entry below for why a
+  transcript-tailing (or RPC-tailing) chat can never show it.
+- **Wave 9's live UAT reproduced the deadlock directly (OMP 18.0.9, dev build
+  CDP 9432).** New tab → OMP → prompt "what is 7 times 6" confirmed on disk
+  (session recorded the `42` reply) → toggle to Chat produced
+  `ownership: {status:'idle', resolvedSessionId:null}`, `tabPtyId:null`,
+  composer disabled ("No live terminal — toggle back to reconnect."), empty
+  history — wave 8's `hasSendRoute` fix is inert because acquisition never
+  runs. Direct IPC probes isolated why: `ompRpcChat.acquire(...)` returned
+  `{ok:true}` (acquisition itself works) but
+  `ompRpcChat.resolveSessionIdentity({ptyId:'x@@y', cwd:...})` while that
+  session was claimed returned the pane's own OLDER, unrelated session
+  (`mtime-fallback` source) even though the correct session's mtime was
+  strictly newer — after `release()`, the same call returned the correct
+  session. This is Defect 2 (`claimedSessionFilePaths` excluded the asking
+  pane's own claim, not just other panes'). Defect 1 (the deadlock itself)
+  traced to `ptyId` being both required by, and part of the cache key of,
+  `use-omp-pane-session-identity.ts`'s `identityEligible`/`identityKey`,
+  and duplicated in `use-omp-rpc-chat-pane-ownership.ts`'s own
+  `identityEligible`/F9 latch key — acquire kills the pty → `ptyId` nulls
+  → both hooks discard the resolved identity and flip ineligible →
+  ownership resets to `idle` → composer disabled forever. Both fixed this
+  wave; see the Shipped table and the standing-rule Trap entry below.
+- **Wave 10's live UAT (dev build, CDP 9432) confirmed the first
+  acquire/hand-back cycle now works end to end.** First Chat toggle
+  acquires, composer enables ("Send a message…"), history renders, an RPC
+  prompt streams and is written to the real session file, and hand-back
+  respawns a PTY and resumes the correct session (verified via breadcrumb
+  + on-disk JSONL) — wave 9's Defect 1/2 fixes hold. Toggling to Chat a
+  SECOND time (a re-acquire after the successful hand-back) reproduced a
+  new bug: `ownership: {status:'spawn-failed', resolvedSessionId:'01a047d1-…'}`
+  (identity resolution correct — not at fault), `tab.ptyId` and
+  `layout.ptyIdsByLeafId` both still pointing at the just-killed pty, and a
+  process check finding **no** session-owning `omp --mode rpc` child and
+  **no** omp TUI for that pane — `killPtyBeforeOmpRpcAcquire` killed the
+  PTY, the RPC child failed to spawn (the machine had swap at ~95% during
+  the run; the spawn failure itself is environmental and out of scope —
+  see the Traps entry), and nothing restored the PTY: the exact "worst
+  outcome" D1 exists to prevent. Root-caused and fixed this wave — see the
+  Shipped table (`a9cca6315`).
+- **Wave 11's live UAT (dev build, CDP) re-tested the same two-cycle path
+  wave 10 fixed and found the PTY genuinely restored (`pty: 'live'` —
+  `tab.ptyId`/`ptyIdsByLeafId[leafId]` both correctly rebound) but the
+  composer still stuck on "No live terminal", disabled — a D1
+  degrade-contract violation wave 10's own fix did not close. Traced to a
+  fourth one-sided pty-binding site, this time not in the store at all:
+  `TerminalPane.tsx`'s `chatPanePtyId`/`chatOwnerPtyId` — the sole source
+  for the composer's `targetPtyId` and for `useOmpRpcChatPaneOwnership`'s
+  own `ptyId` input — read exclusively from the pane's connected
+  `PtyTransport` (`paneTransportsRef`), which `respawnPtyForOmpRpcChatHandback`
+  never rebinds; the transport's own exit handling genuinely nulls itself
+  when Decision 1's kill happens, and nothing ever tells it about the
+  replacement PTY the RPC hand-back/restore spawns via IPC. Confirms cycle 1
+  (acquire → stream → hand-back) is live-verified end to end (wave 10's own
+  entry above); this wave's finding is specific to the acquire-failure
+  restore path. Root-caused and fixed this wave — see the Shipped table
+  (`969daa3d2`).
+- **Wave 12's live UAT and re-test (CDP, real reasoning turns, Fable 5
+  thinking high) found and closed two independent ordering defects.** First,
+  the RPC reasoning overlay never retired because it was compared with the
+  transcript's assistant prose; `nativeChatOverlayLeadsTranscriptReasoning`
+  now retires it against the current turn's `role: 'reasoning'` row
+  (`b63d72f5a`). The first re-test then exposed a second layer: `readSession`
+  returned `[reasoning, assistant]` correctly, but the render list's
+  equal-timestamp id tie-break reversed `${base}:reasoning` and `${base}`.
+  The narrow split-sibling comparator fix (`0082f76fc`) preserves the decoder's
+  semantic order. Final live proof: one "REASONING" row rendered before the
+  answer, no duplicate overlay remained, the composer returned enabled at
+  `idle`, and Chat → Terminal → Chat restored the same session and history.
+- **The idle recap cannot be obtained over RPC — confirmed via a dedicated
+  idle-window probe (wave 12).** A 200-second idle window held open on a
+  session-owning RPC client, after a completed turn, produced **zero**
+  frames of any kind — no `setStatus`, no `notify`, nothing. This is
+  independent confirmation of, and consistent with, wave 7's
+  complete-turn-dump finding above: OMP's recap is computed and rendered
+  entirely client-side by the TUI (`recap.enabled`/`recap.idleSeconds`,
+  driven by `ctx.showStatus` on terminal idleness) and never crosses the RPC
+  wire under any condition tested, including sustained post-turn idleness,
+  not just mid-turn activity. It cannot be obtained over RPC and MUST NOT be
+  synthesized client-side — see the Traps entry above for why.
+- **Advisor notes are durably persisted, and are definitively not the
+  source of the recap (wave 12).** `__advisor.jsonl` records each finalized
+  advisor turn as an `advise` toolCall with `arguments: { note, severity }`
+  — live-confirmed example: `{ note: 'Stay silent — the answer already
+  matches the ask.', severity: 'nit' }`. Severities are `nit`/`concern`/
+  `blocker` only — there is no `recap` severity anywhere in the advisor
+  record, ruling out the recap being a mis-surfaced advisor note. This
+  remains the real path to surfacing advisor content later (open item 2c);
+  reading `__advisor.jsonl` itself is still out of scope this wave.
+
+## Design decisions
+
+- **Ownership registry is the only safety mechanism.** OMP does not enforce single-writer,
+  so `src/shared/claimed-agent-rpc-owner.ts` deliberately shares *one* registry with
+  `claimed-agent-pty-owner.ts` rather than standing up a parallel one. An RPC child and a
+  PTY child must never write the same OMP session concurrently.
+- **Handoff ordering is the invariant:** dispose → prove exit → release → resume. An
+  unprovable exit keeps the claim held and returns `unverifiable` (fail closed).
+- **Never hardcode OMP surface.** Slash commands come from the catalog at runtime; the
+  typed decoder is a floor, not a ceiling (`command_output` is untyped).
+- **Raw frames:** opt-in, bounded diagnostic capture. Not a durable ledger.
+- No dynamic third-party adapter loader and no arbitrary renderer code — built-in adapter
+  only, against #10099's contract.
+- **D5 — status derives from the RPC turn, not the hook, while RPC owns the
+  pane.** `session.status` is overridden to `'working'` whenever
+  `isOmpRpcTurnActive` is true, so Stop/isWorking/viewState react to the RPC
+  stream instead of a hook that a PTY-exited pane will never emit again.
+- **D2 (verified during wave 2, not just assumed).** Plain local "New tab ->
+  OMP" never registers a claim in the runtime's shared
+  `ClaimedAgentPtyOwnerRegistry` (`src/main/ipc/pty/pane/agent-session-owners.ts`)
+  — that registry is populated only by the remote/paired-device resume path
+  (`terminal.ensureAgentSession`/`createAgentSession`), never by a local
+  `pty:spawn`. Real dual-writer safety for the RPC<->PTY handoff comes from
+  `isLocalPtyAlive` (a genuine OS-level `provider.hasPty(ptyId)` check) plus
+  `OmpRpcSessionOwner`'s fail-closed exit-proof gates, not from registry
+  sharing with that global registry. This is why `OmpRpcChatSessionRegistry`
+  is deliberately its own isolated `ClaimedAgentPtyOwnerRegistry` instance.
+- **The pane's OMP identity is a session id; the RPC wire needs a path.** OMP's hook
+  reports only a `session_id`, never a `session_file` (`agent-status-extension-source.ts`,
+  #8962), unlike pi/prime-agent — so `transcriptPath` is always null for omp panes. The id
+  is therefore the *claim identity*, and the session-file path used for `switch_session` is
+  resolved from it at the IPC boundary. Do not pass the id to `switch_session`; see the
+  live-probed fact above for why that fails silently.
+- **Decision 1 (wave 4, amended wave 5, mount-anchor fixed wave 6) — kill-and-resume on first chat use.**
+  Chat-view activation for an OMP pane acquires the session by killing the pane's
+  PTY (`pty.kill(ptyId, {keepHistory:true})`, single-PTY granularity, best-effort
+  — the registry's existing liveness/exit-proof gate is the real proof) and
+  resuming that same session in the RPC child, holding RPC ownership for the
+  pane's life. Killing suppresses the exit first (`suppressPtyExit`, left armed
+  — wave 5, Critical A) and proactively clears the tab's pty binding to a
+  well-defined "RPC-owned, no PTY" state, rather than leaving an unsuppressed
+  exit to route through the same teardown a genuine crash would (it closed the
+  whole tab for the common single-pane case).
+  **Wave 5 replaced the wave-4 hand-back design.** The original design used a
+  second, `isVisible`-gated effect deferring past a tick then polling
+  `turnState` indefinitely for settlement, reconciled with F9 as a separate
+  effect from acquire/release. A cross-lab review found this effect is
+  *unreachable*: the real "leave Chat view" trigger (`TerminalPane.tsx`'s
+  portal render gate returning null) unmounts the whole hook, which `isVisible`
+  flipping while mounted does not model — `rerender()` in the wave-4 tests
+  modeled the wrong transition and is why they passed against the broken
+  trigger (see the Traps entry below). The actual trigger — the *first*
+  effect's unconditional cleanup — released through `handoffToPty`'s then-
+  unconditional abort, so a mere view toggle silently aborted a live turn, the
+  exact outcome F9 forbids, and never respawned a PTY at all.
+  **Hand-back ownership now lives in main, not the renderer hook.** The acquire
+  effect's cleanup (and its cancelled-before-acquired race) express intent via
+  `release({ paneKey, respawn: { replacedPtyId, cwd, sessionId } })` and return
+  immediately — no polling, no settle-wait, in the renderer. Main's
+  `handoffToPty` gates aborting behind an explicit, unused-by-default
+  `allowAbort` opt-in (default: never abort; wait, bounded, for the turn to
+  settle on its own; fail closed to `unverifiable` — keeping the claim — if it
+  doesn't) and `performRelease` only tears down on the proven `'exited'`
+  result. Only once release genuinely settles+exits does main push
+  `ompRpcChat:handback` to the renderer; `use-omp-rpc-chat-handback-listener.ts`,
+  subscribed once by `TerminalPane` (which stays mounted underneath
+  `NativeChatView` through the very unmount that triggers hand-back), performs
+  the actual `pty.spawn` + rebind via the unchanged
+  `respawnPtyForOmpRpcChatHandback`. A respawned pty is still a fresh acquire
+  identity (`ptyId` changed), so the F9 visibility latch still resets for it.
+  **Known limitation, not fixed this wave:** if a turn never settles within
+  `handoffToPty`'s bounded wait (`OMP_RPC_SETTLE_TIMEOUT_MS`, currently tuned
+  for the settle-then-exit-proof sequence generally, not specifically for
+  "user left Chat view mid-turn"), the release fails closed and nothing retries
+  it — the pane is left with neither a live PTY nor a respawned one until the
+  user returns to Chat view (which re-attaches to the still-running session,
+  since `acquire()` finds and reuses it) or the process is otherwise handled.
+  This trades a possibly-long "no terminal" window for never silently killing
+  live work — deliberately, per the brief that drove this wave — but a
+  durable retry-until-settled loop (mirroring the old effect's indefinite
+  poll, just hosted where it can survive the unmount) is future work if that
+  window proves too disruptive in UAT.
+  **Wave 6 amendment — the "pane's life" claim above was aspirational, not
+  actual, until this wave.** A third-lab architecture review found the
+  acquire/hold hook (`use-omp-rpc-chat-session.ts`) was mounted inside
+  `NativeChatView`, which mounts only while Chat view is showing — so every
+  ordinary Terminal<->Chat toggle unmounted it, releasing (dispose, prove
+  exit, respawn a PTY) and re-acquiring (kill, spawn) on the very next
+  toggle back, up to ~15s of bounded waits plus omp cold-start for a toggle
+  that is instant today. The hook (renamed
+  `use-omp-rpc-chat-pane-ownership.ts`) now mounts once in `TerminalPane`
+  instead — the surface wave 5's hand-back listener already lives on for
+  exactly this reason — and publishes status/turnState into a
+  paneKey-scoped store slice (`ompRpcChatOwnershipByPaneKey`) rather than
+  returning React state, since the component that owns this lifecycle is no
+  longer the component that renders it; `NativeChatView` is now a pure
+  remountable subscriber (`use-native-chat-omp-rpc-integration.ts`). Every
+  guard above (F9 latch, F5 generation/StrictMode, cancelled-before-acquired,
+  bounded conflict retry, `suppressPtyExit`-before-kill left armed,
+  `allowAbort` false, D1 fail-closed degrade) carries over unchanged onto the
+  new lifecycle — only the mount point moved. Release fires only on a
+  genuine identity rebind, pane/tab close, or app quit, never a bare view
+  toggle. `use-omp-rpc-chat-handback-listener.ts` is unaffected: it was
+  already anchored at `TerminalPane`, subscribed once regardless of which
+  hook drives acquisition above it.
+- **Decision 2 (wave 4, hardened wave 5) — bypass the broken hook, resolve from OMP's own on-disk
+  state.** Rather than wait on open item 2's hook-delivery fix, the pane's OMP session
+  identity is resolved directly from `~/.omp/agent/terminal-sessions/<terminal-id>`
+  (preferred) or the newest-by-mtime file in the pane's encoded-cwd session bucket
+  (fallback heuristic), then confirmed by the existing post-acquire `get_state()` check
+  that was already in `OmpRpcSessionOwner.acquire()` from wave 3's F12 fix — that check
+  already *is* Decision 2's "confirm via get_state," no new code was needed for it. Every
+  resolved path is verified to exist on disk before being handed to `switch_session`
+  (`omp-terminal-session-identity.ts`) — the single most dangerous failure mode this wave
+  guards against is a wrong path silently minting an empty session (see the trap below).
+  This closes open item 1's gate (b) without depending on item 2's fix; item 2 (hook
+  delivery to the renderer) remains open and still blocks the *transcript-reading* path
+  for a PTY-hosted (non-RPC-owned) OMP pane — a separate, still-broken concern this wave
+  did not touch.
+  **Wave 5 hardening (secondary review findings C/D/E, all Medium/Low, none exploitable):**
+  the breadcrumb cwd comparison and cwd-bucket encoding now normalize both sides (realpath
+  + trailing-slash strip) before comparing, so a symlinked worktree or a trailing slash no
+  longer reads as stale-tty mismatch (finding D); the mtime fallback excludes session files
+  another live pane already claimed via a new `claimedSessionFilePaths` option, so two panes
+  sharing a cwd can no longer both resolve to the same session (finding C); and
+  `resolveSessionIdentity`'s IPC handler now verifies pty locality itself via
+  `localPtyProvider` before scanning local disk, rather than relying solely on the
+  renderer's own `runtimeEnvironmentId === null` gate (finding E).
+
+## Open work, in recommended order
+
+1. ~~Streaming turns over RPC~~ — **built (waves 1-3), both handoff gates closed
+   (wave 4), still not live-exercised against a real OMP pane.**
+   `prompt`/`steer`/`follow_up`/`abort`, message/tool/turn frames, and
+   `extension_ui_request` are wired end-to-end into `NativeChat`: acquire/subscribe/release
+   lifecycle, overlay rendering, D5 status override, composer send routing, the Follow up
+   affordance, and the extension-UI card. Two adversarial reviews then found 12 defects
+   (2 critical, 6 high) — all fixed in `fcb5180aa` with a regression test each. **Every
+   invariant D1-D7 has at least one test that fails if it regresses.**
+   Wave 4 closed the two gates that previously blocked acquisition entirely:
+   (a) *Handoff trigger* — **closed by Decision 1.** Acquisition now kills the pane's
+   live PTY and resumes it in the RPC child, instead of only ever finding one already
+   exited.
+   (b) *No session id to acquire with* — **closed by Decision 2.** The pane's session
+   identity is resolved from OMP's own on-disk state (breadcrumb, then mtime fallback),
+   bypassing the broken hook chain entirely, rather than waiting on item 2's fix.
+   Read this honestly: the feature is *tested*, still not *proven in a live app*.
+   Wave 5 additionally repaired two Critical defects a cross-lab adversarial
+   review found in wave 4's kill-and-resume/hand-back machinery — an
+   unsuppressed kill that could close the whole tab (Critical A), and an
+   unreachable hand-back effect whose real trigger silently aborted a live
+   turn and never respawned a PTY (Critical B) — see Decision 1's amendment
+   above. No end-to-end run against a real OMP pane has happened yet — that
+   is explicitly the next wave's job, and it needs a human at the keyboard
+   (New tab → OMP, open Chat, watch a real turn stream, switch to Terminal
+   view mid-turn and back, confirm the interrupted-turn status row renders
+   on a killed-mid-turn resume, confirm a mid-turn "leave Chat view" neither
+   aborts the turn nor loses the PTY once it settles). The wave-1/2 and
+   wave-4 experience is the argument for doing that UAT before trusting any
+   of it: two waves in a row shipped a critical defect that only a live
+   probe (wave 2) or a cross-lab adversarial review (wave 4) caught, never
+   the wave's own test suite. Wave 4's own new mechanisms
+   (terminal-id-from-tty-path, the cwd-bucket encoding's `--<encoded-absolute>--` branch)
+   are similarly unverified against a real OMP process — see the "Verified live facts"
+   caveats above.
+   Wave 6 additionally fixed two real defects a third-lab architecture
+   review found that five waves and two implementation reviews missed: the
+   turn-completion flicker (overlay gated on the binary `working` flag
+   instead of transcript content coverage) and RPC ownership actually being
+   scoped to the Chat-view mount rather than the pane's life as Decision 1
+   always intended. Wave 13 completed the missing live UAT: cold acquisition,
+   transcript hydration, Terminal↔Chat toggles, and an active turn all retained
+   one pane-scoped RPC owner. It also fixed the shortcut mount and leaf-route bug.
+2. **Hook delivery to the renderer for OMP panes** — still broken end to end. No longer
+   blocks item 1's acquisition path (Decision 2 bypassed it), but still blocks the
+   *transcript-reading* path for a PTY-hosted (non-RPC-owned) OMP pane: `sessionFile`/
+   `sessionId` for that path still comes from this broken hook chain. Four code gates
+   were fixed in `763add4d4` and unit-proven, but a live pane still records nothing after
+   a *complete* turn. Proven chain: no hook event → `recordAgentProviderSession`
+   never fires → no provider session id → `nativeChat.readSession` returns
+   `{error:"Transcript unavailable", notFound:true}` → the chat view renders the user
+   message but never the assistant reply, and `agentStatusByPaneKey` stays empty. `/usage`
+   is unaffected only because it bypasses the transcript entirely.
+   **Wave 7 amendment — closed for the RPC-owned chat view specifically, still open for
+   the underlying hook.** Live UAT hit exactly this: an RPC-owned pane's Chat view still
+   fed the transcript read from this same broken `resolution.sessionId`, so the pane
+   rendered the empty state ("Start a chat with OMP") even after a completed turn, with
+   the composer correctly reporting no live terminal (RPC ownership had already killed
+   the PTY) — a D1 violation in practice: neither history nor terminal. Wave 4 built the
+   hook bypass (`use-omp-pane-session-identity.ts`, Decision 2) but wired it only to
+   acquisition, not the transcript read. `NativeChatView.tsx`/`native-chat-pane-resolution.ts`
+   now prefer a *sticky, store-published* copy of that resolved identity
+   (`ompRpcChatOwnershipByPaneKey[paneKey].resolvedSessionId`, written by the ownership
+   hook once known and never cleared by the pane's own later ptyId churn) over the hook
+   value — `resolveEffectiveNativeChatSessionId`. This closes the gap for the chat view
+   without fixing the hook itself; item 2's hook-delivery fix (below) is still what a
+   PTY-hosted (non-RPC-owned) OMP pane needs.
+   Prime suspect: prod and dev builds write the same
+   `~/.omp/agent/extensions/orca-agent-status.ts`, so hook endpoint routing can cross apps.
+   Check whether the extension embeds an endpoint at write time or reads it from env at
+   runtime (`src/main/pi/agent-status-extension-source.ts`,
+   `src/main/ipc/pty/host-env/pi-agent.ts`, `src/shared/agent-hook-endpoint-file.ts`).
+2c. **Advisor transcript rendering (Bug 2c) — deferred, not implemented this wave.**
+   `omp://advisor-watchdog.md` documents that every finalized advisor turn is appended to
+   `__advisor*.jsonl` inside the owning session's artifacts directory (reserved
+   `__advisor` stem, append-only, follows session switches) — confirmed present and
+   correctly shaped for `decodeOmpTranscriptLine` (`type:'message'` rows carrying
+   `thinking`/`text` content, so Bug 2a's reasoning split already applies to it verbatim
+   if it were ever read). The doc also states accepted advisor notes land in the primary
+   transcript too, as XML-escaped `<advisory>` elements — Orca's decoder does not
+   currently decode that element at all, so double-rendering is not yet a risk, but any
+   future advisor read must check this before rendering both sources. Deferred rather
+   than implemented because: (a) it needs a new read source stitched into the message
+   list as a distinct, clearly-attributed, read-only "advisor" row — not a small addition
+   alongside Bug 1/2a/2b's scope, and this wave's working rules cap live-UAT-driven fixes
+   to what the UAT actually surfaced (the advisor's *absence* from chat was not itself a
+   reported UAT symptom, only inferred while investigating the recap); (b) the artifacts
+   directory's path-derivation-from-session-file rule is not yet implemented anywhere in
+   this codebase and needs its own existence-verification discipline (the same
+   never-hand-an-unverified-path lesson `omp-terminal-session-identity.ts` already
+   learned), which is real, unrehearsed work; (c) the dedup story against the `<advisory>`
+   primary-transcript duplicate needs a decoder change, not just a new read call. Next
+   wave's job if wanted: read `__advisor*.jsonl` alongside the primary transcript,
+   render its turns as a distinct advisor-kind row, and decode/suppress `<advisory>`
+   elements in the primary transcript so the same note is never shown twice.
+3. Subagent frames; unknown-frame diagnostic rendering; opt-in raw capture.
+4. **Complete session-scoped command routing.** `/usage` now runs over RPC and renders
+   its captured output plus the explicit local-command completion marker. Every other
+   catalog command still falls back to the PTY path, which is unavailable while RPC owns
+   the pane. Route those commands through the owning session, then consume the
+   `session_info_update` and `config_update` side channels that current `rpc.md` documents.
+   The current OMP RPC source does not publish a `session_switch` wire frame; the older
+   instruction to subscribe to one was stale.
+6. SSH/remote runtime locality; mobile read parity (`nativeChatRequiresLocalTranscript`
+   semantics change once RPC bypasses disk) — the RPC session hook is already
+   local-only-gated (`runtimeEnvironmentId === null`), so this item is scoping
+   the *removal* of that gate, not adding one. Wave 4's new mechanisms (`getSlavePath`,
+   the terminal-id/breadcrumb resolver) are also local-provider-only today — a daemon or
+   SSH pane's `getSlavePath` is absent, so those panes fall straight to the mtime-fallback
+   heuristic; extending real breadcrumb resolution to them is part of this item, not done.
+7. Upstream PR against #10099 after the remaining parity tracks below. Core live UAT is
+   complete; the blocker is now missing protocol/host coverage, not an unexercised owner.
+8. **`spawn-failed` on a re-acquire is undetermined, not root-caused — needs a
+   clean-machine retest (wave 11).** Both wave 10's and wave 11's live UAT
+   reproduced the RPC child failing to spawn on a second acquire, but both
+   runs had the test machine under heavy memory pressure (wave 10: ~95%
+   swap; wave 11: ~93% swap) with no spawn error surfaced in the main-process
+   logs either time. Explicitly not chased this wave (see the working rules
+   above) — do not add retries or weaken the exit-proof/single-writer gates
+   to paper over it. This wave's fix (`resolveEffectiveChatPanePtyId`) makes
+   the *outcome* of a `spawn-failed` status safe (a restored pty still gets
+   a working composer), which is orthogonal to *why* the spawn itself fails.
+   Next step: re-run the same two-cycle UAT on an otherwise-idle machine; if
+   `spawn-failed` still reproduces there, it is a genuine product defect
+   worth its own investigation, not an artifact of memory pressure.
+
+## Traps that cost real time
+
+- **Recap transport is now available, but requires the matching OMP change.** The old
+  ceiling was real for OMP 18.0.6: recap existed only in TUI memory. OMP branch
+  `feat/rpc-idle-recap` (`460ff2f753`) adds typed `recap_update` frames and
+  `get_state.latestRecap`; Orca now validates, reduces, invalidates, and renders those
+  frames as the same `※ recap:` aside. Until that OMP change lands in the runtime Orca
+  launches, no client can receive the frame. Reconnect hydration from
+  `get_state.latestRecap` remains part of the history/reconnect track.
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
 - `hydrateShellPath` (`src/main/startup/hydrate-shell-path.ts`) caches its result promise
   process-wide **including a cold-start timeout failure**, which made `omp` permanently
   unresolvable (`executable-not-found` forever). `src/main/ipc/omp-rpc-executable-resolver.ts`

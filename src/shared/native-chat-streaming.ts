@@ -10,6 +10,27 @@ import type { NativeChatMessage } from './native-chat-types'
  *  consistently across ticks and the real turn can replace it cleanly). */
 export const NATIVE_CHAT_STREAMING_ID = 'streaming'
 
+<<<<<<< HEAD
+||||||| 8fa1b3c16c
+/** Concatenated text of an assistant message's text blocks, trimmed. */
+function assistantText(message: NativeChatMessage | undefined): string {
+  if (!message || message.role !== 'assistant') {
+    return ''
+  }
+=======
+/** Every row of the OMP RPC turn overlay (omp-rpc-turn-overlay.ts) carries this
+ *  prefix. The overlay is that pane's live tail — it renders at the streaming
+ *  bubble's position — so the list comparator needs one cheap test to place the
+ *  whole overlay in that tier. Deliberately narrower than `omp-rpc-`, which
+ *  hydrated history ids (`omp-rpc-history-N`) also start with: those ARE real
+ *  conversation records and must sort on their own clocks. */
+export const OMP_RPC_OVERLAY_ID_PREFIX = 'omp-rpc-overlay-'
+
+export function isOmpRpcOverlayMessageId(id: string): boolean {
+  return id.startsWith(OMP_RPC_OVERLAY_ID_PREFIX)
+}
+
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
 /** Concatenated text of a message's text blocks, trimmed. */
 function messageText(message: NativeChatMessage): string {
   return message.blocks
@@ -70,6 +91,7 @@ export function nativeChatOverlayLeadsTranscriptContent(args: {
   if (!text) {
     return false
   }
+<<<<<<< HEAD
   const lastText = nativeChatAssistantText(messages.at(-1))
   return !(lastText.includes(text) || text.length <= lastText.length)
 }
@@ -105,14 +127,65 @@ export function nativeChatOverlayLeadsTranscriptReasoning(args: {
  * `nativeChatOverlayLeadsTranscriptContent` directly instead, since its
  * overlay must persist past `working` flipping false until the transcript
  * catches up.
+||||||| 8fa1b3c16c
+ * Decide the streaming text to show, or null to show nothing. Returns the
+ * preview only while it leads the transcript — i.e. it's longer than (and not
+ * already contained in) the last assistant turn. Once the real turn lands with
+ * the same (or more) text, the preview is suppressed so the bubble doesn't
+ * duplicate or flicker as the transcript catches up.
+ *
+ * `working` gates it: a stale preview from a finished turn never shows.
+=======
+  const lastText = lastTurnMessageText(messages, 'assistant')
+  return !(lastText.includes(text) || text.length <= lastText.length)
+}
+
+/**
+ * Content-only leads comparison for the reasoning overlay: whether the
+ * overlay's reasoning text is longer than (and not already contained in)
+ * the transcript's own `role: 'reasoning'` row (wave-7 decoder output) for
+ * the current turn. Deliberately never compares against the transcript's
+ * assistant prose — thinking prose never matches an assistant reply, so
+ * that compare left the reasoning overlay leading (and thus rendering)
+ * forever, even long after the transcript settled the turn. See
+ * `lastTurnMessageText` for the turn-boundary scan.
+ */
+export function nativeChatOverlayLeadsTranscriptReasoning(args: {
+  messages: readonly NativeChatMessage[]
+  overlayText: string
+}): boolean {
+  const { messages, overlayText } = args
+  const text = overlayText.trim()
+  if (!text) {
+    return false
+  }
+  const lastText = lastTurnMessageText(messages, 'reasoning')
+  return !(lastText.includes(text) || text.length <= lastText.length)
+}
+
+/**
+ * Decide the streaming text to show, or null to show nothing: gated on
+ * `working` outright (a stale preview from a finished turn never shows),
+ * then on `nativeChatOverlayLeadsTranscriptContent`'s content comparison.
+ * The RPC turn-stream overlay (native-chat/omp-rpc-turn-reducer.ts) calls
+ * `nativeChatOverlayLeadsTranscriptContent` directly instead, since its
+ * overlay must persist past `working` flipping false until the transcript
+ * catches up.
+ *
+ * `previewIsToolOutput` hard-gates it: several providers publish a tool's stdout or
+ * error as `lastAssistantMessage` so status cards can preview it. That text is not the
+ * reply, and it never appears in a transcript assistant block — so the catch-up rules
+ * below can never retire it and it would sit in the chat until the turn ended.
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
  */
 export function deriveNativeChatStreamingText(args: {
   messages: readonly NativeChatMessage[]
   previewText: string | null | undefined
   working: boolean
+  previewIsToolOutput?: boolean
 }): string | null {
-  const { messages, previewText, working } = args
-  if (!working) {
+  const { messages, previewText, working, previewIsToolOutput } = args
+  if (!working || previewIsToolOutput) {
     return null
   }
   const text = previewText?.trim() ?? ''

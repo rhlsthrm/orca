@@ -12,6 +12,7 @@ import { isOmpRpcObject } from './omp-rpc-frame-validation'
 
 type OmpRpcTurnCommandDependencies = {
   whenReady: () => Promise<unknown>
+<<<<<<< HEAD
   sendCommand: (command: OmpRpcCommand) => Promise<unknown>
   /** Raw stdin write bypassing command correlation (an extension_ui_response
    *  answers a server-issued request by its own `id`, not a pending command). */
@@ -39,6 +40,45 @@ export class OmpRpcTurnCommands {
       ...(options?.images ? { images: options.images } : {}),
       ...(options?.streamingBehavior ? { streamingBehavior: options.streamingBehavior } : {})
     })
+||||||| 8fa1b3c16c
+=======
+  /** `requestId` pins the wire `id` so the caller can correlate a later
+   *  server-pushed frame with this exact command. */
+  sendCommand: (command: OmpRpcCommand, requestId?: string) => Promise<unknown>
+  /** Raw stdin write bypassing command correlation (an extension_ui_response
+   *  answers a server-issued request by its own `id`, not a pending command). */
+  writeRaw: (frame: OmpRpcExtensionUiResponse) => boolean
+}
+
+function agentInvokedResult(data: unknown): { agentInvoked: boolean } {
+  return {
+    agentInvoked:
+      isOmpRpcObject(data) && typeof data.agentInvoked === 'boolean' ? data.agentInvoked : true
+  }
+}
+
+export class OmpRpcTurnCommands {
+  constructor(private readonly dependencies: OmpRpcTurnCommandDependencies) {}
+
+  readonly prompt = async (
+    message: string,
+    options?: {
+      images?: OmpRpcImageContent[]
+      streamingBehavior?: OmpRpcStreamingBehavior
+      requestId?: string
+    }
+  ): Promise<{ agentInvoked: boolean }> => {
+    await this.dependencies.whenReady()
+    const data = await this.dependencies.sendCommand(
+      {
+        type: 'prompt',
+        message,
+        ...(options?.images ? { images: options.images } : {}),
+        ...(options?.streamingBehavior ? { streamingBehavior: options.streamingBehavior } : {})
+      },
+      options?.requestId
+    )
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
     return agentInvokedResult(data)
   }
 

@@ -1,6 +1,11 @@
 import { describe, expect, it } from 'vitest'
 import {
   deriveNativeChatStreamingText,
+<<<<<<< HEAD
+||||||| 8fa1b3c16c
+=======
+  nativeChatOverlayLeadsTranscriptContent,
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
   nativeChatOverlayLeadsTranscriptReasoning,
   nativeChatStreamingMessage,
   NATIVE_CHAT_STREAMING_ID
@@ -28,8 +33,28 @@ const reasoning = (text: string): NativeChatMessage => ({
   timestamp: null,
   source: 'transcript'
 })
+<<<<<<< HEAD
+||||||| 8fa1b3c16c
+=======
+const tool = (): NativeChatMessage => ({
+  id: 'tool-1',
+  role: 'tool',
+  blocks: [],
+  timestamp: null,
+  source: 'transcript'
+})
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
 
 describe('deriveNativeChatStreamingText', () => {
+  it('drops an overlay already covered by assistant text before a tool result', () => {
+    expect(
+      nativeChatOverlayLeadsTranscriptContent({
+        messages: [assistant('Checking the workspace'), tool()],
+        overlayText: 'Checking...'
+      })
+    ).toBe(false)
+  })
+
   it('returns null when not working (stale preview never shows)', () => {
     expect(
       deriveNativeChatStreamingText({ messages: [], previewText: 'Hello there', working: false })
@@ -89,6 +114,31 @@ describe('deriveNativeChatStreamingText', () => {
         working: true
       })
     ).toBeNull()
+  })
+
+  it('drops a preview flagged as tool output even when it leads the transcript', () => {
+    // Regression: providers publish a tool's stdout as `lastAssistantMessage` for status
+    // cards. It leads every transcript assistant turn and never appears in one, so without
+    // this gate it rendered as the reply and no catch-up rule could ever retire it.
+    expect(
+      deriveNativeChatStreamingText({
+        messages: [assistant('Partial')],
+        previewText: 'Exit code 1\nimport { Foo } from "./foo"\nexport function bar() {}',
+        working: true,
+        previewIsToolOutput: true
+      })
+    ).toBeNull()
+  })
+
+  it('still shows a leading preview when it is not tool output', () => {
+    expect(
+      deriveNativeChatStreamingText({
+        messages: [assistant('Partial')],
+        previewText: 'Partial answer that is now much longer than before',
+        working: true,
+        previewIsToolOutput: false
+      })
+    ).toBe('Partial answer that is now much longer than before')
   })
 
   it('keeps showing while the preview still leads (grows past the last turn)', () => {

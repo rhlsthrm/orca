@@ -60,6 +60,7 @@ describe('NativeChatComposerActions', () => {
     expect(pickers.nextElementSibling).toBe(dictation)
   })
 
+<<<<<<< HEAD
   it('hides the follow-up toggle when omitted, and toggles it when provided', () => {
     const onToggle = vi.fn()
     const { rerender } = render(
@@ -104,5 +105,86 @@ describe('NativeChatComposerActions', () => {
     const followUpButton = screen.getByRole('button', { name: 'Follow up' })
     fireEvent.click(followUpButton)
     expect(onToggle).toHaveBeenCalledTimes(1)
+||||||| 8fa1b3c16c
+=======
+  it('marks the streaming Stop control as the critical hit target', () => {
+    render(
+      <NativeChatComposerActions
+        attachDisabled={false}
+        dictationDisabled={false}
+        sendDisabled={false}
+        isWorking
+        isDictating={false}
+        isDictationHoldMode={false}
+        onAttach={vi.fn()}
+        onDictationToggle={vi.fn()}
+        onDictationHoldStart={vi.fn()}
+        onDictationHoldEnd={vi.fn()}
+        onSend={vi.fn()}
+        onStop={vi.fn()}
+        sessionOptionsSurface={null}
+        sessionOptionsSnapshot={[]}
+      />
+    )
+
+    expect(
+      screen
+        .getByRole('button', { name: 'Stop the agent' })
+        .getAttribute('data-native-chat-critical-action')
+    ).toBe('stop')
+  })
+
+  it('ignores the second click of a double-click after send becomes Stop', () => {
+    const onSend = vi.fn()
+    const onStop = vi.fn()
+    render(
+      <NativeChatComposerActions
+        attachDisabled={false}
+        dictationDisabled={false}
+        sendDisabled={false}
+        isWorking
+        isDictating={false}
+        isDictationHoldMode={false}
+        onAttach={vi.fn()}
+        onDictationToggle={vi.fn()}
+        onDictationHoldStart={vi.fn()}
+        onDictationHoldEnd={vi.fn()}
+        onSend={onSend}
+        onStop={onStop}
+        sessionOptionsSurface={null}
+        sessionOptionsSnapshot={[]}
+      />
+    )
+
+    fireEvent.click(screen.getByRole('button', { name: 'Stop the agent' }), { detail: 2 })
+
+    expect(onSend).not.toHaveBeenCalled()
+    expect(onStop).not.toHaveBeenCalled()
+  })
+  it('shows and activates the OMP follow-up toggle when provided', () => {
+    const onToggle = vi.fn()
+    const props = {
+      attachDisabled: false,
+      dictationDisabled: false,
+      sendDisabled: false,
+      isWorking: true,
+      isDictating: false,
+      isDictationHoldMode: false,
+      onAttach: vi.fn(),
+      onDictationToggle: vi.fn(),
+      onDictationHoldStart: vi.fn(),
+      onDictationHoldEnd: vi.fn(),
+      onSend: vi.fn(),
+      onStop: vi.fn(),
+      sessionOptionsSurface: null,
+      sessionOptionsSnapshot: []
+    }
+    const { rerender } = render(<NativeChatComposerActions {...props} />)
+    expect(screen.queryByRole('button', { name: 'Follow up' })).toBeNull()
+
+    rerender(<NativeChatComposerActions {...props} followUp={{ active: false, onToggle }} />)
+    fireEvent.click(screen.getByRole('button', { name: 'Follow up' }))
+    expect(onToggle).toHaveBeenCalledOnce()
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
   })
 })

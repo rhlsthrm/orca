@@ -8,6 +8,11 @@
 // needs a stateful decoder contract shared by every agent, not an omp-only fix.
 
 import {
+  ompAdvisorNotesText,
+  ompAdvisorTurnId,
+  readOmpAdvisorNotes
+} from '../../shared/omp-advisor-notes'
+import {
   NATIVE_CHAT_INTERRUPTED_STATUS_TEXT,
   type NativeChatBlock,
   type NativeChatMessage
@@ -36,6 +41,27 @@ export function decodeOmpTranscriptLine(
   if (!record || (record.type !== 'message' && record.type !== 'custom_message')) {
     return null
   }
+  const decoded = decodeOmpRecord(record, fallbackId)
+  if (decoded === null) {
+    return null
+  }
+  // The message's OWN clock, not the envelope's write time. An RPC history page
+  // carries only the inner message (omp-rpc-history-decode.ts), so this is the
+  // one reading both sources share — and the envelope is stamped at persist
+  // time, seconds later. Cross-source record identity needs the shared one.
+  const originTimestamp = parseTimestamp(asRecord(record.message)?.timestamp)
+  if (originTimestamp === null) {
+    return decoded
+  }
+  return Array.isArray(decoded)
+    ? decoded.map((message) => ({ ...message, originTimestamp }))
+    : { ...decoded, originTimestamp }
+}
+
+function decodeOmpRecord(
+  record: Record<string, unknown>,
+  fallbackId: string
+): NativeChatMessage | NativeChatMessage[] | null {
   const id = extractString(record.id) ?? fallbackId
   const timestamp = parseTimestamp(record.timestamp)
 
@@ -43,7 +69,14 @@ export function decodeOmpTranscriptLine(
     // Why: these extension-authored turns reach the model, and omp's own
     // transcript renders them — but only when `display` is set; the rest are
     // extension state it never shows (CustomMessageEntry, session-entries.d.ts).
-    const customBlocks = record.display === true ? ompContentBlocks(record.content) : []
+    if (record.display !== true) {
+      return null
+    }
+    const advisor = decodeOmpAdvisorCard(record, id, timestamp)
+    if (advisor) {
+      return advisor
+    }
+    const customBlocks = ompContentBlocks(record.content)
     return customBlocks.length === 0
       ? null
       : { id, role: 'system', blocks: customBlocks, timestamp, source: 'transcript' }
@@ -110,6 +143,22 @@ export function decodeOmpTranscriptLine(
   if ((role === 'custom' || role === 'hookMessage') && message.display !== true) {
     return null
   }
+<<<<<<< HEAD
+||||||| 8fa1b3c16c
+  const blocks = ompContentBlocks(message.content)
+  if (blocks.length === 0) {
+=======
+  // The hydrated `get_messages_page` path re-wraps a bare AgentMessage in this
+  // envelope (omp-rpc-history-decode.ts), so an advisor card reaches the
+  // decoder here as well as through `custom_message` — both must resolve to the
+  // same turn identity or the two copies render twice.
+  if (role === 'custom') {
+    const advisor = decodeOmpAdvisorCard(message, id, timestamp)
+    if (advisor) {
+      return advisor
+    }
+  }
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
   // Bug 2a (wave 7): omp's `thinking` content blocks used to flatten into the
   // same message's `blocks` as ordinary text, rendering reasoning as plain
   // assistant prose — visually indistinguishable from the reply, and
@@ -151,6 +200,40 @@ export function decodeOmpTranscriptLine(
     messages.push({ id, role: messageRole, blocks, timestamp, source: 'transcript' })
   }
   return messages.length === 1 ? messages[0] : messages
+<<<<<<< HEAD
+||||||| 8fa1b3c16c
+  return { id, role: messageRole, blocks, timestamp, source: 'transcript' }
+=======
+}
+
+/** An advisor note batch, rendered as its own attributed row rather than the
+ *  agent-facing `<advisory>` XML the generic custom-message path would show
+ *  verbatim. The `turnId` (content plus the card's own clock) is what collapses
+ *  this copy against the live RPC frame's (omp-rpc-turn-overlay.ts) — no
+ *  carrier supplies a shared id. Null when the record is not an advisor card. */
+function decodeOmpAdvisorCard(
+  record: Record<string, unknown>,
+  id: string,
+  timestamp: number | null
+): NativeChatMessage | null {
+  const notes = readOmpAdvisorNotes(record)
+  // A bare AgentMessage carries the card clock as epoch ms on the message
+  // itself; a persisted entry has only the ISO envelope, which omp stamped
+  // from that same value.
+  const cardClock = typeof record.timestamp === 'number' ? record.timestamp : timestamp
+  const turnId = ompAdvisorTurnId(notes, cardClock)
+  if (!turnId) {
+    return null
+  }
+  return {
+    id,
+    role: 'system',
+    blocks: [{ type: 'text', text: ompAdvisorNotesText(notes) }],
+    timestamp,
+    source: 'transcript',
+    turnId
+  }
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
 }
 
 /** A bash/python execution cell: the invocation, then its captured output. */

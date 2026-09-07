@@ -45,6 +45,7 @@ function buildArgs(overrides: Partial<UseNativeChatComposerSendArgs> = {}): {
   setDraft: ReturnType<typeof vi.fn>
   sendOmpLocalCommand: ReturnType<typeof vi.fn>
   sendOmpRpcChat: ReturnType<typeof vi.fn>
+<<<<<<< HEAD
   resolveTarget: ReturnType<typeof vi.fn>
 } {
   const setNotice = vi.fn()
@@ -116,6 +117,131 @@ describe('useNativeChatComposerSend', () => {
     expect(sendOmpLocalCommand).toHaveBeenCalledWith('/usage')
     expect(resolveTarget).not.toHaveBeenCalled()
     expect(setDraft).toHaveBeenCalledWith('')
+||||||| 8fa1b3c16c
+=======
+  sendOmpRpcCommand: ReturnType<typeof vi.fn>
+  resolveTarget: ReturnType<typeof vi.fn>
+} {
+  const setNotice = vi.fn()
+  const setHistory = vi.fn()
+  const setDraft = vi.fn()
+  const setCaret = vi.fn()
+  const clearSkillOrigin = vi.fn()
+  const clearImageAttachments = vi.fn()
+  const trackPendingSend = vi.fn()
+  const sendOmpLocalCommand = vi.fn(() => false)
+  const sendOmpRpcChat = vi.fn(() => false)
+  const sendOmpRpcCommand = vi.fn(() => false)
+  const resolveTarget = vi.fn((): NativeChatResolvedTarget | null => null)
+  const classification: NativeChatSendClassification = 'chat'
+  const classifySend = vi.fn(() => classification)
+  const args: UseNativeChatComposerSendArgs = {
+    agent: 'codex',
+    terminalTabId: 'tab-1',
+    draft: 'hello',
+    imageAttachments: [],
+    hasPendingAttachment: false,
+    disabled: false,
+    isDispatchingSessionOption: false,
+    launchDraftResolved: false,
+    readTerminalScreen: () => null,
+    resolveTarget,
+    classifySend,
+    sendOmpLocalCommand,
+    sendOmpRpcChat,
+    sendOmpRpcCommand,
+    sessionOptionsSurface: null,
+    trackPendingSend,
+    setHistory,
+    setDraft,
+    setCaret,
+    clearSkillOrigin,
+    clearImageAttachments,
+    setNotice,
+    ...overrides
+  }
+  return {
+    args,
+    setNotice: args.setNotice as ReturnType<typeof vi.fn>,
+    setHistory: args.setHistory as ReturnType<typeof vi.fn>,
+    setDraft: args.setDraft as ReturnType<typeof vi.fn>,
+    sendOmpLocalCommand: args.sendOmpLocalCommand as ReturnType<typeof vi.fn>,
+    sendOmpRpcChat: args.sendOmpRpcChat as ReturnType<typeof vi.fn>,
+    sendOmpRpcCommand: args.sendOmpRpcCommand as ReturnType<typeof vi.fn>,
+    resolveTarget: args.resolveTarget as ReturnType<typeof vi.fn>
+  }
+}
+
+function image(id: string): NativeChatComposerImageAttachment {
+  return { id, path: `/tmp/${id}.png` }
+}
+
+describe('useNativeChatComposerSend', () => {
+  beforeEach(() => {
+    vi.clearAllMocks()
+    sendNativeChatMessage.mockReturnValue({ cancel: vi.fn(), settleAfterMs: 0 })
+    sendNativeChatTypedCommand.mockReturnValue({ cancel: vi.fn(), settleAfterMs: 0 })
+  })
+
+  it('runs an OMP local command over RPC without ever resolving a PTY target (D1)', () => {
+    const { args, resolveTarget, sendOmpLocalCommand, setDraft } = buildArgs({
+      draft: '/usage',
+      sendOmpLocalCommand: vi.fn(() => true)
+    })
+    const { result } = renderHook(() => useNativeChatComposerSend(args))
+
+    act(() => result.current())
+
+    expect(sendOmpLocalCommand).toHaveBeenCalledWith('/usage')
+    expect(resolveTarget).not.toHaveBeenCalled()
+    expect(setDraft).toHaveBeenCalledWith('')
+  })
+
+  it('routes a catalog command to the RPC session without ever resolving a PTY target', () => {
+    const { args, resolveTarget, sendOmpRpcCommand, setDraft } = buildArgs({
+      draft: '/help',
+      classifySend: vi.fn((): NativeChatSendClassification => 'command'),
+      sendOmpRpcCommand: vi.fn(() => true)
+    })
+    const { result } = renderHook(() => useNativeChatComposerSend(args))
+
+    act(() => result.current())
+
+    expect(sendOmpRpcCommand).toHaveBeenCalledWith('/help')
+    expect(resolveTarget).not.toHaveBeenCalled()
+    expect(sendNativeChatMessage).not.toHaveBeenCalled()
+    expect(setDraft).toHaveBeenCalledWith('')
+  })
+
+  it('keeps a command on the PTY when the RPC session declines it', () => {
+    const { args, sendOmpRpcCommand } = buildArgs({
+      draft: '/help',
+      classifySend: vi.fn((): NativeChatSendClassification => 'command'),
+      sendOmpRpcCommand: vi.fn(() => false),
+      resolveTarget: vi.fn(() => ({ settings: {}, ptyId: 'pty-1' }) as NativeChatResolvedTarget)
+    })
+    const { result } = renderHook(() => useNativeChatComposerSend(args))
+
+    act(() => result.current())
+
+    expect(sendOmpRpcCommand).toHaveBeenCalledWith('/help')
+    // buildArgs' default agent is codex, whose commands take the typed path.
+    expect(sendNativeChatTypedCommand).toHaveBeenCalledWith({}, 'pty-1', '/help')
+  })
+
+  it('keeps a command with an image attachment on the PTY path — RPC send is text-only', () => {
+    const { args, sendOmpRpcCommand } = buildArgs({
+      draft: '/help',
+      imageAttachments: [image('a')],
+      classifySend: vi.fn((): NativeChatSendClassification => 'command'),
+      sendOmpRpcCommand: vi.fn(() => true)
+    })
+    const { result } = renderHook(() => useNativeChatComposerSend(args))
+
+    act(() => result.current())
+
+    expect(sendOmpRpcCommand).not.toHaveBeenCalled()
+>>>>>>> 8471c69a7eb936467bf9cb94bb459fc92df13a0d
   })
 
   it('routes a chat prompt to the RPC session without ever resolving a PTY target (D1/D6)', () => {
