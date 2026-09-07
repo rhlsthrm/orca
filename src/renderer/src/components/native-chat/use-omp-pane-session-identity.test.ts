@@ -1,6 +1,6 @@
 // @vitest-environment happy-dom
 
-import { renderHook, waitFor } from '@testing-library/react'
+import { act, renderHook, waitFor } from '@testing-library/react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import type {
   OmpRpcChatResolveSessionIdentityArgs,
@@ -12,6 +12,7 @@ vi.mock('./use-omp-rpc-commands', () => ({
 }))
 
 import {
+  OMP_PANE_IDENTITY_REPROBE_INTERVAL_MS,
   useOmpPaneSessionIdentity,
   type UseOmpPaneSessionIdentityArgs
 } from './use-omp-pane-session-identity'
@@ -262,5 +263,97 @@ describe('useOmpPaneSessionIdentity', () => {
 
     await waitFor(() => expect(resolveSessionIdentity).toHaveBeenCalledTimes(1))
     expect(result.current).toBeNull()
+  })
+
+  // Live UAT 2026-09-07 (chat-first flow): a fresh agent tab toggled to Chat
+  // before any prompt has no session file yet, so the first resolution
+  // legitimately lands null — and no hook input changes when OMP lazily
+  // creates the session on the first send. Without a re-probe the pane's
+  // identity (and with it the transcript hydration) stays null forever.
+  it('keeps probing a visible unresolved pane until its session materializes (chat-first flow)', async () => {
+    vi.useFakeTimers()
+    try {
+      resolveSessionIdentity.mockResolvedValueOnce(null)
+      resolveSessionIdentity.mockResolvedValueOnce(null)
+      resolveSessionIdentity.mockResolvedValue({ sessionId: 'late-session', source: 'breadcrumb' })
+      const { result } = renderHook(() => useOmpPaneSessionIdentity(BASE_ARGS))
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(result.current).toBeNull()
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(OMP_PANE_IDENTITY_REPROBE_INTERVAL_MS)
+        await vi.advanceTimersByTimeAsync(OMP_PANE_IDENTITY_REPROBE_INTERVAL_MS)
+      })
+      expect(resolveSessionIdentity).toHaveBeenCalledTimes(3)
+      expect(result.current).toBe('late-session')
+
+      // Self-terminating: the first non-null resolution ends the chain.
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(OMP_PANE_IDENTITY_REPROBE_INTERVAL_MS * 4)
+      })
+      expect(resolveSessionIdentity).toHaveBeenCalledTimes(3)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('suspends unresolved re-probing while hidden and resumes when visible again', async () => {
+    vi.useFakeTimers()
+    try {
+      resolveSessionIdentity.mockResolvedValue(null)
+      const { result, rerender } = renderHook(
+        (props: UseOmpPaneSessionIdentityArgs) => useOmpPaneSessionIdentity(props),
+        { initialProps: BASE_ARGS }
+      )
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(resolveSessionIdentity).toHaveBeenCalledTimes(1)
+
+      rerender({ ...BASE_ARGS, isVisible: false })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(OMP_PANE_IDENTITY_REPROBE_INTERVAL_MS * 5)
+      })
+      // The armed timer fired once while hidden and stopped without probing.
+      expect(resolveSessionIdentity).toHaveBeenCalledTimes(1)
+
+      resolveSessionIdentity.mockResolvedValue({ sessionId: 'session-1', source: 'breadcrumb' })
+      rerender({ ...BASE_ARGS, isVisible: true })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(result.current).toBe('session-1')
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('never starts a re-probe chain from a null probe on an already-resolved pane', async () => {
+    vi.useFakeTimers()
+    try {
+      resolveSessionIdentity.mockResolvedValueOnce({ sessionId: 'session-1', source: 'breadcrumb' })
+      const { result, rerender } = renderHook(
+        (props: UseOmpPaneSessionIdentityArgs) => useOmpPaneSessionIdentity(props),
+        { initialProps: BASE_ARGS }
+      )
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(0)
+      })
+      expect(result.current).toBe('session-1')
+
+      // A later dep-change probe can legitimately return null; the sticky
+      // merge ignores it, and no polling may begin.
+      resolveSessionIdentity.mockResolvedValue(null)
+      rerender({ ...BASE_ARGS, ptyId: 'pty-2' })
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(OMP_PANE_IDENTITY_REPROBE_INTERVAL_MS * 5)
+      })
+      expect(result.current).toBe('session-1')
+      expect(resolveSessionIdentity).toHaveBeenCalledTimes(2)
+    } finally {
+      vi.useRealTimers()
+    }
   })
 })
