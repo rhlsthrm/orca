@@ -13,6 +13,7 @@ import type {
   SessionOptionsSurface
 } from '../../../../shared/native-chat-session-options'
 import type { NativeChatOptionPickerRequest } from './native-chat-composer-types'
+import type { NativeChatComposerFollowUp } from './use-native-chat-composer-omp-rpc-send'
 import { NativeChatImageAttachmentPreview } from './NativeChatImageAttachmentPreview'
 
 export type NativeChatComposerFieldProps = {
@@ -22,7 +23,7 @@ export type NativeChatComposerFieldProps = {
   textareaRef: RefObject<HTMLTextAreaElement | null>
   draft: string
   disabled: boolean
-  hasPty: boolean
+  hasSendRoute: boolean
   canSend: boolean
   autocomplete: ComposerAutocomplete
   activeSuggestion: number
@@ -54,6 +55,7 @@ export type NativeChatComposerFieldProps = {
   sessionOptionsSurface: SessionOptionsSurface | null
   sessionOptionsSnapshot: SessionOptionDescriptor[]
   sessionOptionsPickerRequest?: NativeChatOptionPickerRequest | null
+  followUp?: NativeChatComposerFollowUp | null
 }
 
 export type NativeChatComposerImageAttachment = {
@@ -94,7 +96,7 @@ export function NativeChatComposerField({
   textareaRef,
   draft,
   disabled,
-  hasPty,
+  hasSendRoute,
   canSend,
   autocomplete,
   activeSuggestion,
@@ -125,7 +127,8 @@ export function NativeChatComposerField({
   onStop,
   sessionOptionsSurface,
   sessionOptionsSnapshot,
-  sessionOptionsPickerRequest
+  sessionOptionsPickerRequest,
+  followUp
 }: NativeChatComposerFieldProps): React.JSX.Element {
   // Value the IME started from, and whether a programmatic clear was dropped on top of it.
   const compositionBaseRef = useRef('')
@@ -248,7 +251,7 @@ export function NativeChatComposerField({
                   ? `${pickerListboxId}-option-${Math.min(activeSuggestion, autocomplete.items.length - 1)}`
                   : undefined
               }
-              placeholder={nativeChatComposerPlaceholder(hasPty, canSend)}
+              placeholder={nativeChatComposerPlaceholder(hasSendRoute, canSend)}
               // Why: coarse-pointer min-height follows the app's touch target convention.
               // field-sizing:content grows the field with the draft; the 8lh cap (plus
               // py-1) turns further growth into internal scrolling, and scrollbar-sleek
@@ -277,6 +280,7 @@ export function NativeChatComposerField({
                 sessionOptionsSurface={sessionOptionsSurface}
                 sessionOptionsSnapshot={sessionOptionsSnapshot}
                 sessionOptionsPickerRequest={sessionOptionsPickerRequest}
+                followUp={followUp}
               />
             </div>
           </div>

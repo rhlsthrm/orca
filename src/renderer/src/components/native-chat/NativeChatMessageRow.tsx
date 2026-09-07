@@ -17,6 +17,7 @@ import { nativeChatProseToMarkdown } from './native-chat-prose'
 import {
   NativeChatAgentControls,
   NativeChatImageAttachments,
+  NativeChatReasoningLabel,
   ProviderFrameRow
 } from './NativeChatTranscriptChrome'
 import type { RuntimeFileOperationArgs } from '@/runtime/runtime-file-client'
@@ -181,6 +182,7 @@ export const MessageRow = memo(function MessageRow({
         isSystem && 'text-xs text-muted-foreground'
       )}
     >
+      {isReasoning ? <NativeChatReasoningLabel /> : null}
       <NativeChatImageAttachments
         blocks={prose}
         runtimeContext={runtimeContext}
