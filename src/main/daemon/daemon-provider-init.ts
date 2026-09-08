@@ -24,7 +24,10 @@ import {
 import type { DaemonProvider } from './daemon-provider-routing'
 import { installDaemonProvider } from './daemon-provider-state'
 import { DegradedDaemonPtyProvider } from './degraded-daemon-pty-provider'
+import { trackDaemonAdopted } from './daemon-adoption-telemetry-event'
+import { readDaemonPidRecord } from './daemon-endpoint-incarnation'
 import { trackDaemonRetired } from './daemon-lifecycle-event'
+import { getMacDaemonTccAttributionHealth } from './daemon-tcc-attribution'
 import { DaemonPtyAdapter } from './daemon-pty-adapter'
 import type { DaemonRespawnReason } from './daemon-pty-runtime-state'
 import { DaemonPtyRouter } from './daemon-pty-router'
@@ -125,12 +128,10 @@ export async function initDaemonPtyProvider(
             probeCurrentDaemonSpawn: async () =>
               (await checkDaemonHealth(info.socketPath, info.tokenPath)) === 'healthy'
           })
-        : legacyAdapters.length > 0
-          ? new DaemonPtyRouter({
-              current: newAdapter,
-              legacy: legacyAdapters
-            })
-          : newAdapter
+        : new DaemonPtyRouter({
+            current: newAdapter,
+            legacy: legacyAdapters
+          })
     if (routedAdapter instanceof DegradedDaemonPtyProvider) {
       // Why: preserved daemon can't create fresh terminals; discover its live session ids so only they route to it (fresh panes fall back locally).
       await routedAdapter.discoverDaemonSessions()
@@ -156,7 +157,35 @@ export async function initDaemonPtyProvider(
   logDaemonMilestone('daemon-init-done', {
     legacyAdapters: legacyAdapters.length
   })
+  if (process.platform === 'darwin' && newSpawner.getHandle()?.adopted) {
+    void reportDaemonAdoption(runtimeDir, info.socketPath, info.tokenPath, newAdapter)
+  }
   await reconcileSeededClaudeLivePtys(routedAdapter)
+}
+
+// Why off the init path: this is measurement of an adopted daemon (#17696), and neither its probes nor their failure may delay or fail startup.
+async function reportDaemonAdoption(
+  runtimeDir: string,
+  socketPath: string,
+  tokenPath: string,
+  adapter: DaemonPtyAdapter
+): Promise<void> {
+  try {
+    const [tccAttribution, liveSessionCount] = await Promise.all([
+      getMacDaemonTccAttributionHealth(runtimeDir, socketPath, tokenPath),
+      adapter.listSessions().then(
+        (sessions) => sessions.length,
+        () => null
+      )
+    ])
+    trackDaemonAdopted(
+      readDaemonPidRecord(getDaemonPidPath(runtimeDir)),
+      tccAttribution,
+      liveSessionCount
+    )
+  } catch {
+    // Best-effort measurement only.
+  }
 }
 
 // Why: release gate ids only for daemon-confirmed-dead sessions; keep seeds on listing failure since releasing early can rotate a live CLI's refresh token.

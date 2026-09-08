@@ -1,5 +1,11 @@
 import type * as pty from 'node-pty'
 import type { IPtyProvider, PtyProcessInfo, PtySpawnOptions, PtySpawnResult } from './types'
+import { readPtySlavePath } from '../../shared/pty-slave-line-discipline-echo'
+import {
+  WRITE_ACCEPTED,
+  writeRefused,
+  type WriteSettlement
+} from '../../shared/pty-write-settlement'
 import {
   confirmLocalPtyForegroundProcess,
   confirmLocalPtyShellForeground,
@@ -70,8 +76,16 @@ export class LocalPtyProvider implements IPtyProvider {
   hasPty(id: string): boolean {
     return ptyProcesses.has(id)
   }
+  getSlavePath(id: string): string | undefined {
+    return readPtySlavePath(ptyProcesses.get(id))
+  }
   write(id: string, data: string): boolean {
     return writeLocalPty(id, data)
+  }
+
+  // In-process node-pty is its own sole owner, so its synchronous answer is the settlement.
+  writeWithSettlement(id: string, data: string): WriteSettlement {
+    return writeLocalPty(id, data) ? WRITE_ACCEPTED : writeRefused('provider_refused_write')
   }
   resize(id: string, cols: number, rows: number): void {
     resizeLocalPty(id, cols, rows)

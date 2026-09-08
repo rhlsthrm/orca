@@ -139,6 +139,10 @@ export type TerminalActions = {
   ) => void
   /** Reconciles exact exits; bulk clear intentionally retains relay-grace identity. */
   clearTabPtyId: (tabId: string, ptyId?: string) => void
+  /** Protects a tab from orphan cleanup after an unverified PTY loss. */
+  markUnverifiedPtyLoss: (tabId: string) => void
+  /** Records the relay's own answer that a PTY id is gone; the one `exited` a respawn may act on. */
+  markPtySourceDisowned: (ptyId: string) => void
   clearDirectSshTargetPtyBindings: (targetId: string) => number
   invalidateStaleDirectSshTargetPtyBindings: (authority: DirectSshAuthority) => number
   retryDirectSshTargetPanes: (authority: DirectSshAuthority, now?: number) => number
@@ -181,6 +185,14 @@ export type TerminalActions = {
   dismissCodexRestartNotices: (ptyIds: string[]) => void
   reopenCodexRestartPrompt: (ptyId: string) => void
   replaceTerminalLayoutPanePtyId: (tabId: string, leafId: string, ptyId: string) => void
+  /** Deletes a leaf's stale `ptyIdsByLeafId` entry — guarded on `ptyId`
+   *  still matching, so it can never clobber a newer binding a race
+   *  already wrote. Unlike `clearExitedPanePtyLayoutBinding` (the
+   *  crash-exit path, which also repairs `activeLeafId` off a now-dead
+   *  focused pane), this is for an intentional, in-place ownership
+   *  handoff (Decision 1's RPC acquire kill) where the leaf keeps focus —
+   *  no active-leaf repair. */
+  clearTerminalLayoutPanePtyId: (tabId: string, leafId: string, ptyId: string) => void
   setTabPaneExpanded: (tabId: string, expanded: boolean) => void
   setTabCanExpandPane: (tabId: string, canExpand: boolean) => void
   setTabLayout: (tabId: string, layout: TerminalLayoutSnapshot | null) => void

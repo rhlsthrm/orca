@@ -1,19 +1,12 @@
 import { describe, expect, it, vi } from 'vitest'
 import { DaemonPtyRouter } from './daemon-pty-router'
+import { localOmpRpcSessionWriteFence } from '../omp-rpc/omp-rpc-local-session-write-fence'
 import { SessionNotFoundError, TerminalSessionOwnerUnverifiedError } from './daemon-errors'
 import type { DaemonPtyAdapter } from './daemon-pty-adapter'
+import { settledWriteStub, stubWriteSettlement } from '../providers/settled-pty-write-stub'
 import type { PtyBackgroundStreamEvent, PtySpawnOptions, PtySpawnResult } from '../providers/types'
-import {
-  AGENT_SESSION_CLAIM_DAEMON_PROTOCOL_VERSION,
-  AGENT_SESSION_CREATE_OPERATION_DAEMON_PROTOCOL_VERSION,
-  GIT_CREDENTIAL_GUARD_HOST_PROTOCOL_VERSION
-} from './types'
-import {
-  HISTORY_SEED_TRANSFER_PROTOCOL_VERSION,
-  PROTOCOL_VERSION,
-  SNAPSHOT_SERIALIZER_FIDELITY_DAEMON_PROTOCOL_VERSION,
-  STABLE_PANE_ATTACH_ONLY_DAEMON_PROTOCOL_VERSION
-} from './daemon-protocol-version'
+import { AGENT_SESSION_CLAIM_DAEMON_PROTOCOL_VERSION, AGENT_SESSION_CREATE_OPERATION_DAEMON_PROTOCOL_VERSION, GIT_CREDENTIAL_GUARD_HOST_PROTOCOL_VERSION } from './types'
+import { HISTORY_SEED_TRANSFER_PROTOCOL_VERSION, PROTOCOL_VERSION, SNAPSHOT_SERIALIZER_FIDELITY_DAEMON_PROTOCOL_VERSION, STABLE_PANE_ATTACH_ONLY_DAEMON_PROTOCOL_VERSION } from './daemon-protocol-version'
 
 type AdapterMock = DaemonPtyAdapter & {
   emitData: (id: string, data: string, sequenceChars?: number) => void
@@ -76,7 +69,7 @@ function createAdapter(
     write: vi.fn((id: string, data: string) => {
       writes.push({ id, data })
     }),
-    writeWithSettlement: vi.fn(async () => true),
+    writeWithSettlement: vi.fn(settledWriteStub()),
     resize: vi.fn(),
     setPtyBackgrounded: vi.fn(),
     getBufferSnapshot: vi.fn(async () => null),
@@ -210,12 +203,13 @@ it('rejects completion inspection when no daemon owns the session', async () => 
   await expect(router.inspectProcess('unmapped-session')).rejects.toThrow('terminal_gone')
 })
 
-it('preserves unavailable inspection from the owning legacy daemon', async () => {
+it('preserves client-only unverifiable inspection from the owning legacy daemon', async () => {
   const legacy = createAdapter('legacy', ['legacy-session'])
   vi.mocked(legacy.inspectProcess).mockResolvedValue({
     foregroundProcess: null,
-    hasChildProcesses: true,
-    unavailable: true
+    hasChildProcesses: false,
+    verdict: 'unverifiable',
+    reason: 'old_host'
   })
   const router = new DaemonPtyRouter({
     current: createAdapter('current'),
@@ -225,8 +219,9 @@ it('preserves unavailable inspection from the owning legacy daemon', async () =>
 
   await expect(router.inspectProcess('legacy-session')).resolves.toEqual({
     foregroundProcess: null,
-    hasChildProcesses: true,
-    unavailable: true
+    hasChildProcesses: false,
+    verdict: 'unverifiable',
+    reason: 'old_host'
   })
 })
 
@@ -244,6 +239,27 @@ it('forwards the owning legacy daemon sequence from attach', async () => {
 })
 
 describe('DaemonPtyRouter', () => {
+  it('refuses a daemon OMP resume while the local RPC writer fence owns its session', async () => {
+    const current = createAdapter('current')
+    const router = new DaemonPtyRouter({ current, legacy: [] })
+    const sessionFilePath = '/sessions/2026-09-04T00-00-00-000Z_session-1.jsonl'
+    localOmpRpcSessionWriteFence.reserve(sessionFilePath, 'rpc-pane:1')
+
+    try {
+      await expect(
+        router.spawn({
+          cols: 80,
+          rows: 24,
+          cwd: '/work',
+          command: "omp '--resume' 'session-1'"
+        })
+      ).rejects.toThrow('agent_session_conflict')
+      expect(current.spawn).not.toHaveBeenCalled()
+    } finally {
+      localOmpRpcSessionWriteFence.release(sessionFilePath, 'rpc-pane:1')
+    }
+  })
+
   it('reports separate conservative resume and fresh-create boundaries', () => {
     const current = createAdapter(
       'current',
@@ -463,11 +479,13 @@ describe('DaemonPtyRouter', () => {
   it('routes settlement-aware writes to the owning daemon generation', async () => {
     const current = createAdapter('current')
     const legacy = createAdapter('legacy', ['legacy-session'])
-    vi.mocked(legacy.writeWithSettlement).mockResolvedValue(false)
+    vi.mocked(legacy.writeWithSettlement).mockResolvedValue(stubWriteSettlement(false))
     const router = new DaemonPtyRouter({ current, legacy: [legacy] })
     await router.discoverLegacySessions()
 
-    await expect(router.writeWithSettlement('legacy-session', 'pointer')).resolves.toBe(false)
+    await expect(router.writeWithSettlement('legacy-session', 'pointer')).resolves.toEqual(
+      stubWriteSettlement(false)
+    )
     expect(legacy.writeWithSettlement).toHaveBeenCalledWith('legacy-session', 'pointer')
     expect(current.writeWithSettlement).not.toHaveBeenCalled()
   })

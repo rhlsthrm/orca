@@ -6,6 +6,7 @@ import type { RpcContext } from '../core'
 // one oversized tool-result block; the test then asserts clip behavior per client.
 const OVERSIZED = 'x'.repeat(5000)
 const cachedResult = vi.hoisted(() => ({
+  preserveTailWindow: false,
   value: {
     messages: [] as NativeChatMessage[],
     // Optional so truncation-gating fixtures can omit it; lifecycle tests set it explicitly.
@@ -68,7 +69,7 @@ vi.mock('../../../native-chat/transcript-watch', () => ({
     tailRead.signal = signal
     const messages = cachedResult.value.messages
     return Promise.resolve({
-      messages: messages.slice(-limit),
+      messages: cachedResult.preserveTailWindow ? messages : messages.slice(-limit),
       hasMore: messages.length > limit,
       beforeOffset: 123,
       ...(cachedResult.value.lifecycle ? { lifecycle: cachedResult.value.lifecycle } : {})
@@ -266,6 +267,39 @@ describe('nativeChat.readSession clientKind truncation gating', () => {
     expect(JSON.stringify(input)).toContain('truncated')
   })
 
+  // The roster block reached mobile through a bare fall-through, uncapped, on the
+  // one path that exists to keep the payload off the phone.
+  it('bounds a spawn-group roster before sending it to mobile', async () => {
+    cachedResult.value = {
+      messages: [
+        {
+          ...makeMessage('ignored'),
+          blocks: [
+            {
+              type: 'subagent-group',
+              groupId: 'thread-1:turn-1',
+              agents: Array.from({ length: 80 }, (_unused, index) => ({
+                id: `child-${index}`,
+                label: index === 0 ? OVERSIZED : 'read',
+                state: index === 0 ? (OVERSIZED as 'working') : ('working' as const)
+              }))
+            }
+          ]
+        }
+      ]
+    }
+
+    const result = await readSessionHandler()({ agent: 'codex', sessionId: 's' }, ctxWith('mobile'))
+    const block = (result as { messages: NativeChatMessage[] }).messages[0].blocks[0]
+    if (block.type !== 'subagent-group') {
+      throw new Error('expected a subagent-group block')
+    }
+
+    expect(block.agents).toHaveLength(64)
+    expect(block.agents[0].label.length).toBeLessThan(OVERSIZED.length)
+    expect(block.agents[0].state).toBe('unverifiable')
+  })
+
   it('preserves AskUserQuestion option objects at the supported nesting depth', async () => {
     cachedResult.value = {
       messages: [
@@ -413,6 +447,27 @@ describe('nativeChat.readSession clientKind truncation gating', () => {
     expect(messages.at(-1)?.id).toBe('m-59')
     expect(messages[0].id).toBe('m-20')
     expect(result).toMatchObject({ hasMore: true, beforeOffset: 123 })
+  })
+
+  it('preserves every message the tail reader kept from one source record', async () => {
+    cachedResult.preserveTailWindow = true
+    cachedResult.value = {
+      messages: [
+        { ...makeTextMessage('reasoning'), id: 'reasoning' },
+        { ...makeTextMessage('answer'), id: 'answer' },
+        { ...makeTextMessage('user'), id: 'user' }
+      ]
+    }
+    const result = await readSessionHandler()(
+      { agent: 'omp', sessionId: 's', limit: 2 },
+      ctxWith('runtime')
+    )
+    expect((result as { messages: NativeChatMessage[] }).messages.map((message) => message.id)).toEqual([
+      'reasoning',
+      'answer',
+      'user'
+    ])
+    cachedResult.preserveTailWindow = false
   })
 })
 

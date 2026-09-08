@@ -1,21 +1,22 @@
 import type { PiAgentKind } from '../../shared/pi-agent-kind'
+import { getPiAgentStatusUiPromptHandlerSourceLines } from './agent-status-ui-prompt-source'
 
 // Why: keep the generated handler registrations separate from hook transport;
 // both are independently sizeable and the installed extension concatenates them.
 export function getPiAgentStatusHandlerSourceLines(kind: PiAgentKind): string[] {
-  const sessionStartHandler =
-    kind !== 'omp'
-      ? [
-          "  pi.on('session_start', (event, ctx) => {",
-          '    updateSessionMetadata(ctx)',
-          '    // Why: /reload re-registers the active session, but it is not a',
-          '    // turn boundary and must not clear the visible status or unread state.',
-          "    if (event.reason === 'reload') return",
-          "    post('session_start')",
-          '  })',
-          ''
-        ]
-      : []
+  // Why: session_start is the only event every Pi-compatible agent fires at TUI
+  // boot, so it is what registers a resumed-but-idle pane's resume identity.
+  const sessionStartHandler = [
+    "  pi.on('session_start', (event, ctx) => {",
+    '    updateSessionMetadata(ctx)',
+    ...(kind === 'pi' ? ['    piUiPromptDepth = 0'] : []),
+    '    // Why: /reload re-registers the active session, but it is not a',
+    '    // turn boundary and must not clear the visible status or unread state.',
+    "    if (event.reason === 'reload') return",
+    "    post('session_start')",
+    '  })',
+    ''
+  ]
 
   // Why: OMP can switch sessions in-process, so each latest-only post needs fresh identity.
   const ctxParam = ', ctx'
@@ -104,6 +105,9 @@ export function getPiAgentStatusHandlerSourceLines(kind: PiAgentKind): string[] 
     ...captureSessionMetadata,
     '    clearPendingAgentEndCheck()',
     '    agentEndReported = false',
+    // Why: a turn cannot begin under a dialog holding input focus, so this is the one
+    // boundary that can recover a modal whose close never arrived.
+    ...(kind === 'pi' ? ['    piUiPromptDepth = 0', '    piTurnInFlight = true'] : []),
     "    post('agent_start')",
     '  })',
     '',
@@ -131,6 +135,7 @@ export function getPiAgentStatusHandlerSourceLines(kind: PiAgentKind): string[] 
     '  })',
     '',
     ...approvalHandlers,
+    ...getPiAgentStatusUiPromptHandlerSourceLines(kind),
     "  // Why: capture the assistant's final text on each completed message",
     '  // so the dashboard preview reflects the most recent reply even before',
     '  // agent_end fires. message_end is the right hook because pi guarantees',
@@ -166,6 +171,9 @@ export function getPiAgentStatusHandlerSourceLines(kind: PiAgentKind): string[] 
     '  function postAgentEndOnce(): void {',
     '    if (agentEndReported) return',
     '    agentEndReported = true',
+    // Why: distinct from agentEndReported, which also dedupes the completion post and so
+    // starts false on a pane that has not run a turn yet — that pane is idle, not busy.
+    ...(kind === 'pi' ? ['    piTurnInFlight = false'] : []),
     "    post('agent_end')",
     '  }',
     '',

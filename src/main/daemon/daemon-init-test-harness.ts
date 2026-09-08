@@ -102,8 +102,13 @@ function createDaemonInitMockState(): DaemonInitMockState {
   const daemonClientMock = vi.fn().mockImplementation(function MockDaemonClient() {
     return {
       ensureConnected: vi.fn(async () => {}),
+      ensureConnectedWithin: vi.fn(async () => {}),
       getDaemonIdentity: vi.fn(readLaunchedDaemonIdentity),
-      request: vi.fn(async () => ({ sessions: [] })),
+      // `shutdown` answers with the physical-PTY-exit proof a current-protocol daemon returns
+      // (daemon-request-router.ts); every other RPC keeps the listSessions shape these tests expect.
+      request: vi.fn(async (method: string) =>
+        method === 'shutdown' ? { physicalPtyExitVerified: true } : { sessions: [] }
+      ),
       disconnect: vi.fn()
     }
   })
@@ -155,6 +160,7 @@ function createDaemonInitMockState(): DaemonInitMockState {
   const rebindLocalProviderListenersMock = vi.fn()
   const trackDaemonReplacedMock = vi.fn()
   const trackDaemonRetiredMock = vi.fn()
+  const trackDaemonAdoptedMock = vi.fn()
 
   return {
     getPathMock,
@@ -196,7 +202,8 @@ function createDaemonInitMockState(): DaemonInitMockState {
     unbindLocalProviderListenersMock,
     rebindLocalProviderListenersMock,
     trackDaemonReplacedMock,
-    trackDaemonRetiredMock
+    trackDaemonRetiredMock,
+    trackDaemonAdoptedMock
   }
 }
 
@@ -212,6 +219,7 @@ export function createDaemonInitMocks(): DaemonInitMocks {
     state.daemonClientMock.mockImplementationOnce(function MockAdoptionClient() {
       return {
         ensureConnected: vi.fn(async () => {}),
+        ensureConnectedWithin: vi.fn(async () => {}),
         request: vi.fn(),
         disconnect: vi.fn()
       }
