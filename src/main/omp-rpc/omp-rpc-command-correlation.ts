@@ -14,17 +14,31 @@ export type OmpRpcPendingResponse = {
   terminalAgentInvoked?: boolean
 }
 
-/** Commands whose reply is turn-scoped, not a query: upstream answers `prompt`
- *  only once a skill or builtin slash command has finished running (`rpc-mode.ts`
+/** Commands whose reply is NOT a query answer: upstream answers `prompt` only
+ *  once a skill or builtin slash command has finished running (`rpc-mode.ts`
  *  awaits `tryRunRpcSkillCommand`/`executeAcpBuiltinSlashCommand` before
  *  replying), and steer/follow_up are answered by the running turn. A deadline
  *  there would abandon live work; every wait XLR-016 has to bound (settle,
- *  release, the acquire queued behind it) is built on the query commands. */
-const OMP_RPC_TURN_SCOPED_COMMANDS: ReadonlySet<OmpRpcCommand['type']> = new Set([
-  'prompt',
-  'steer',
-  'follow_up'
-])
+ *  release, the acquire queued behind it) is built on the query commands.
+ *
+ *  `compact` and `handoff` join them because both run the child's summarizer —
+ *  a real model call over the whole transcript, routinely far past 10s — and
+ *  `login` because it drives an OAuth flow whose code prompt upstream itself
+ *  gives 600s. Deadlining any of the three would reject the caller while the
+ *  work carried on unattributed: the compaction still lands, the handoff
+ *  document still gets written, the credential still gets persisted, and the
+ *  UI reports a failure. Query verbs (get_available_models,
+ *  get_login_providers, get_branch_messages, get_session_stats, get_state,
+ *  get_messages*) deliberately stay deadlined — a hung read must not become an
+ *  unbounded wait. */
+const OMP_RPC_TURN_SCOPED_COMMANDS: Partial<Record<OmpRpcCommand['type'], true>> = {
+  prompt: true,
+  steer: true,
+  follow_up: true,
+  compact: true,
+  handoff: true,
+  login: true
+}
 
 /** Starts the response deadline for a request already registered as `id`
  *  (XLR-016, cross-lab review). A child that is alive and reading stdin but has
@@ -39,7 +53,7 @@ export function armOmpRpcResponseDeadline(
   id: string,
   pending: OmpRpcPendingResponse
 ): void {
-  if (OMP_RPC_TURN_SCOPED_COMMANDS.has(pending.command)) {
+  if (OMP_RPC_TURN_SCOPED_COMMANDS[pending.command]) {
     return
   }
   pending.timeout = setTimeout(() => {

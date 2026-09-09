@@ -10,7 +10,11 @@ import type {
   OmpRpcClientEvent,
   OmpRpcExtensionUiResponse,
   OmpRpcImageContent,
-  OmpRpcStreamingBehavior
+  OmpRpcInterruptMode,
+  OmpRpcQueueMode,
+  OmpRpcStreamingBehavior,
+  OmpRpcThinkingLevel,
+  OmpRpcTodoPhase
 } from './omp-rpc-protocol'
 
 /** Resolves an OMP pane's session identity from OMP's own on-disk state
@@ -141,6 +145,106 @@ export type OmpRpcChatAbortArgs = { paneKey: string }
 export type OmpRpcChatRespondExtensionUiArgs = {
   paneKey: string
   response: OmpRpcExtensionUiResponse
+}
+
+/** Result envelope for every interactive-command verb (`ompRpcChat:setModel`,
+ *  `ompRpcChat:getAvailableModels`, ...). Fail-closed on the same terms as
+ *  `send`: an unowned pane, a rejected wire command, a payload main could not
+ *  validate, and an unreadable post-command session identity all arrive as
+ *  `ok:false` with the reason, never as a throw across IPC and never as a
+ *  half-decoded value. `data` is the verb's own validated payload — verbs
+ *  upstream answers with no `data` carry `void`. */
+export type OmpRpcChatCommandResult<T> = { ok: true; data: T } | { ok: false; reason: string }
+
+/** The single wording every pane-scoped channel refuses an unheld pane with.
+ *  It lives in the contract rather than in one handler module because two
+ *  handlers now produce it (the interactive-command family and the resume
+ *  enumerator, which cannot import from that family without a cycle), and a
+ *  renderer that renders one message per refusal class needs them identical. */
+export const OMP_RPC_CHAT_NO_OWNED_SESSION_REASON = 'no RPC-owned session for this pane'
+
+/** Every interactive command is issued against the session the pane ALREADY
+ *  owns, so the pane key is the whole authorization: main resolves it in its
+ *  own registry and refuses anything it does not hold. No verb here can
+ *  acquire, transfer or widen ownership. */
+export type OmpRpcChatPaneArgs = { paneKey: string }
+
+/** `provider` + `modelId` are matched against the child's own catalog
+ *  upstream; both come from a `getAvailableModels` row, never from user text. */
+export type OmpRpcChatSetModelArgs = OmpRpcChatPaneArgs & { provider: string; modelId: string }
+
+export type OmpRpcChatSetThinkingLevelArgs = OmpRpcChatPaneArgs & { level: OmpRpcThinkingLevel }
+
+/** Shared by `setSteeringMode` and `setFollowUpMode` — upstream takes the same
+ *  two-member union for both queues. */
+export type OmpRpcChatSetQueueModeArgs = OmpRpcChatPaneArgs & { mode: OmpRpcQueueMode }
+
+export type OmpRpcChatSetInterruptModeArgs = OmpRpcChatPaneArgs & { mode: OmpRpcInterruptMode }
+
+/** Shared by the three boolean toggles (`setFastMode`, `setAutoCompaction`,
+ *  `setAutoRetry`). */
+export type OmpRpcChatSetEnabledArgs = OmpRpcChatPaneArgs & { enabled: boolean }
+
+/** Shared by `compact` and `handoff`: both take optional summarizer guidance. */
+export type OmpRpcChatCustomInstructionsArgs = OmpRpcChatPaneArgs & { customInstructions?: string }
+
+/** `entryId` MUST come from a `getBranchMessages` row — upstream throws on an
+ *  entry that is not a user message, so there is nothing to synthesize here. */
+export type OmpRpcChatBranchArgs = OmpRpcChatPaneArgs & { entryId: string }
+
+export type OmpRpcChatSetSessionNameArgs = OmpRpcChatPaneArgs & { name: string }
+
+export type OmpRpcChatNewSessionArgs = OmpRpcChatPaneArgs & { parentSession?: string }
+
+export type OmpRpcChatExportHtmlArgs = OmpRpcChatPaneArgs & { outputPath?: string }
+
+/** `providerId` comes from a `getLoginProviders` row. */
+export type OmpRpcChatLoginArgs = OmpRpcChatPaneArgs & { providerId: string }
+
+export type OmpRpcChatSetTodosArgs = OmpRpcChatPaneArgs & { phases: OmpRpcTodoPhase[] }
+
+/** `sessionPath` is an ABSOLUTE session FILE path, never a bare session id:
+ *  upstream answers a bare id with success and keeps writing the session it
+ *  was already on (F12), so main refuses a relative value with `ok:false`
+ *  instead of sending a frame that silently does nothing. Feed it a
+ *  `OmpRpcChatResumableSession.sessionPath`.
+ *
+ *  This is the `/resume` route: it moves the child the pane ALREADY owns,
+ *  which is why it is not the acquire path — re-acquiring releases the pane's
+ *  existing registration first, and an empty `ptyId` then proves no PTY exit,
+ *  so the pane loses RPC ownership and gets no terminal back. */
+export type OmpRpcChatSwitchSessionArgs = OmpRpcChatPaneArgs & { sessionPath: string }
+
+/** Enumeration input for `/resume`. `cwd` scopes the candidate list to the
+ *  pane's own worktree bucket; sessions already claimed by ANOTHER pane are
+ *  excluded main-side, because switching onto one would put two writers on it. */
+export type OmpRpcChatListResumableSessionsArgs = { paneKey: string; cwd: string }
+
+/** One resumable session row.
+ *
+ *  `sessionPath` is the ABSOLUTE file path `switchSession` takes; `sessionId`
+ *  is for display and for correlating against the pane's own current id.
+ *
+ *  `name` and `startedAt` come from the session file's own header records and
+ *  are absent when it carries neither — absent means UNKNOWN, never empty.
+ *  There is deliberately no message count: the enumerator reads only a small
+ *  header prefix of each candidate file, and counting messages would mean
+ *  reading every session in the bucket end to end.
+ *
+ *  `isCurrent` is computed main-side by comparing `sessionId` against the id
+ *  the registry holds for the asking pane. It is trustworthy because the
+ *  handler refuses a pane the registry does not hold BEFORE enumerating, so
+ *  the pane's own id is always known on the success path — a renderer never
+ *  has to guess which row is live. */
+export type OmpRpcChatResumableSession = {
+  sessionId: string
+  sessionPath: string
+  name?: string
+  /** ISO timestamp from the session header, when it has one. */
+  startedAt?: string
+  /** Epoch milliseconds, from the stat that also proves the file exists. */
+  modifiedAtMs: number
+  isCurrent: boolean
 }
 
 export type OmpRpcChatSubscribeArgs = { paneKey: string; subscriptionId: string }

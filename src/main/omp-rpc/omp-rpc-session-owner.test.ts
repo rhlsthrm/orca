@@ -66,9 +66,35 @@ function claim(): AgentSessionExecutionClaim {
   }
 }
 
-function fakeClient(overrides: Partial<OmpSessionOwningRpcClient> = {}): OmpSessionOwningRpcClient {
+/** The slice of the client contract a session owner actually drives:
+ *  readiness, state reads, the exit proof and disposal. Typed as a `Pick`
+ *  rather than the whole contract so this double stays honest — the
+ *  interactive-command verbs (model/thinking/mode/session/auth) are
+ *  unreachable from every owner path, and faking them here would claim
+ *  coverage this file does not have. Renaming anything it DOES implement
+ *  still breaks compilation. */
+type OwnerDrivenRpcClient = Pick<
+  OmpSessionOwningRpcClient,
+  | 'whenReady'
+  | 'getCommands'
+  | 'prompt'
+  | 'steer'
+  | 'followUp'
+  | 'respondExtensionUi'
+  | 'getState'
+  | 'getMessagesPage'
+  | 'fetchHistory'
+  | 'setSubagentSubscription'
+  | 'switchSession'
+  | 'abort'
+  | 'whenExited'
+  | 'on'
+  | 'dispose'
+>
+
+function fakeClient(overrides: Partial<OwnerDrivenRpcClient> = {}): OmpSessionOwningRpcClient {
   const listeners = new Set<(event: OmpRpcClientEvent) => void>()
-  return {
+  const client: OwnerDrivenRpcClient = {
     whenReady: vi.fn(async () => ({
       ready: {
         type: 'ready' as const,
@@ -102,6 +128,7 @@ function fakeClient(overrides: Partial<OmpSessionOwningRpcClient> = {}): OmpSess
     dispose: vi.fn(),
     ...overrides
   }
+  return client as unknown as OmpSessionOwningRpcClient
 }
 
 const spawnOptions = {

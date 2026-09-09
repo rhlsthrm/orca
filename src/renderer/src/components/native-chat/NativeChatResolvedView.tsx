@@ -10,6 +10,8 @@ import { useNativeChatFontScale } from './use-native-chat-font-scale'
 import { useNativeChatCanSend } from './use-native-chat-can-send'
 import { NativeChatInteractiveCard } from './NativeChatInteractiveCard'
 import { NativeChatExtensionUiCard } from './NativeChatExtensionUiCard'
+import { NativeChatOmpRpcCommandCardSurface } from './NativeChatOmpRpcCommandCardSurface'
+import { useOmpRpcProbeCwd } from './use-omp-rpc-commands'
 import { useNativeChatOmpRpcIntegration } from './use-native-chat-omp-rpc-integration'
 import { NativeChatEmptyState } from './NativeChatEmptyState'
 import { useNativeChatInteractiveSend } from './use-native-chat-interactive-send'
@@ -106,6 +108,10 @@ export function NativeChatResolvedView({
     transcriptWindow,
     hookPreview
   })
+  // The pane's working directory, which the interactive command cards hand to
+  // the verbs that take one (`list_resumable_sessions`). Same resolution the
+  // composer's probe route uses; null means Orca could not resolve one.
+  const ompRpcCardCwd = useOmpRpcProbeCwd(agent, terminalTabId)
   const sessionWithOmpRpcStatus = useMemo<typeof session>(() => {
     if (!ompRpc.statusOverride || session.status === ompRpc.statusOverride) {
       return session
@@ -374,7 +380,19 @@ export function NativeChatResolvedView({
             request={ompRpc.pendingExtensionUiRequest}
             onAnswer={ompRpc.answerExtensionUi}
           />
-        ) : null
+        ) : (
+          /* Orca's own interactive command card (`/switch`). Second in
+           *  precedence because a child request BLOCKS the child while this one
+           *  does not — the card stays in pane state and comes back the moment
+           *  the child's prompt is answered. */
+          <NativeChatOmpRpcCommandCardSurface
+            agent={agent}
+            paneKey={paneKey}
+            cwd={ompRpcCardCwd}
+            ompRpc={ompRpc}
+            onSlashCommand={onSlashCommand}
+          />
+        )
       ) : (
         <NativeChatInteractiveCard
           paneKey={paneKey}
@@ -420,7 +438,8 @@ export function NativeChatResolvedView({
             executableCommands: ompRpc.rpcExecutableCommands,
             commands: ompRpc.rpcCommands,
             sessionGeneration: ompRpc.sessionGeneration,
-            commandQueueKey: ompRpc.commandQueueKey
+            commandQueueKey: ompRpc.commandQueueKey,
+            openInteractiveCard: ompRpc.openInteractiveCard
           }}
         />
       )}

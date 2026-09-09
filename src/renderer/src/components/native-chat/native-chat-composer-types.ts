@@ -86,6 +86,11 @@ export type NativeChatComposerOmpRpcBinding = {
   sessionGeneration?: number
   /** Stable pane-plus-generation identity for the RPC command queue. */
   commandQueueKey?: string
+  /** Opens Orca's own card for a bare interactive command (`/switch`) instead
+   *  of putting text on the wire that OMP would answer with a degraded
+   *  one-liner — or, for a command it does not advertise, hand to the model as
+   *  a prompt. Absent for a pane with no RPC session. */
+  openInteractiveCard?: (command: string) => void
 }
 
 export type NativeChatComposerProps = {

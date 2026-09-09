@@ -27,7 +27,11 @@ import type {
 } from '../../../../shared/omp-rpc-protocol'
 import type { NativeChatTranscriptWindow } from './native-chat-pagination'
 import { ompRpcExecutableCommands, type OmpRpcExecutableCommands } from './omp-rpc-command-catalog'
-import { isOmpRpcTurnActive, type OmpRpcSessionConfig } from './omp-rpc-turn-reducer'
+import {
+  isOmpRpcTurnActive,
+  type OmpRpcOpenInteractiveCard,
+  type OmpRpcSessionConfig
+} from './omp-rpc-turn-reducer'
 import {
   selectOmpRpcOverlayMessages,
   selectOmpRpcRetirableAdvisorTurnIds
@@ -58,6 +62,16 @@ export type NativeChatOmpRpcIntegration = {
   effectiveHookPreview: string | null | undefined
   pendingExtensionUiRequest: OmpRpcExtensionUiRequestFrame | null
   answerExtensionUi: (response: OmpRpcExtensionUiResponse) => void
+  /** The Orca-originated interactive command card this pane is showing, if
+   *  any. Gated on ownership like the child's request: the verbs a card drives
+   *  only exist for a pane main holds. */
+  interactiveCard: OmpRpcOpenInteractiveCard | null
+  /** Opens the card for a bare registered command, replacing any card already
+   *  open — the newer invocation is the one the user just asked for. */
+  openInteractiveCard: (command: string) => void
+  /** Closes it. Scoped by `cardId` so a dismissal cannot close a card that
+   *  replaced the one it was answering. */
+  dismissInteractiveCard: (cardId: string) => void
   sendChat: (args: {
     message: string
     behavior: OmpRpcChatSendBehavior
@@ -117,6 +131,11 @@ export type NativeChatOmpRpcIntegration = {
 /** Stable identity so the retirement effect does not re-run on every render
  *  of a pane that has no advisor card. */
 const NO_RETIRABLE_ADVISOR_TURN_IDS: string[] = []
+
+/** Card ids only need to be unique within this renderer — the child never sees
+ *  one. Module-scoped so a remounted pane cannot mint an id it already holds,
+ *  which is what makes a stale dismissal harmless. */
+let interactiveCardSequence = 0
 
 export function useNativeChatOmpRpcIntegration(
   args: UseNativeChatOmpRpcIntegrationArgs
@@ -191,6 +210,24 @@ export function useNativeChatOmpRpcIntegration(
     effectiveHookPreview: isRpcOwned ? null : args.hookPreview,
     pendingExtensionUiRequest: isRpcOwned ? (turnState?.pendingExtensionUiRequest ?? null) : null,
     answerExtensionUi: (response) => respondOmpRpcChatExtensionUi(paneKey, response),
+    interactiveCard: isRpcOwned ? (turnState?.openInteractiveCard ?? null) : null,
+    openInteractiveCard: (command) => {
+      interactiveCardSequence += 1
+      dispatchOmpRpcChatTurnAction(
+        paneKey,
+        {
+          type: 'interactive-card-opened',
+          card: { cardId: `card-${interactiveCardSequence}`, command }
+        },
+        sessionGeneration
+      )
+    },
+    dismissInteractiveCard: (cardId) =>
+      dispatchOmpRpcChatTurnAction(
+        paneKey,
+        { type: 'interactive-card-dismissed', cardId },
+        sessionGeneration
+      ),
     sendChat: (sendArgs) => sendOmpRpcChatPane(paneKey, sendArgs),
     abortChat: () => abortOmpRpcChatPane(paneKey),
     onCommandDispatched: (commandRunId) =>

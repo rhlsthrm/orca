@@ -1,8 +1,8 @@
-import { useState, type ReactNode } from 'react'
-import { HelpCircle } from 'lucide-react'
+import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { translate } from '@/i18n/i18n'
+import { NativeChatOmpRpcCardShell } from './NativeChatOmpRpcCardShell'
 import type {
   OmpRpcExtensionUiRequestFrame,
   OmpRpcExtensionUiResponse
@@ -38,7 +38,11 @@ export function NativeChatExtensionUiCard({
   if (request.method === 'select') {
     const options = request.options ?? []
     return (
-      <ExtensionUiCardShell title={request.title} message={request.message} footer={timeoutNotice}>
+      <NativeChatOmpRpcCardShell
+        title={request.title}
+        message={request.message}
+        footer={timeoutNotice}
+      >
         <div className="flex flex-wrap gap-2">
           {options.map((option, index) => (
             <Button
@@ -68,13 +72,17 @@ export function NativeChatExtensionUiCard({
             {translate('components.native-chat.extensionUi.cancel', 'Cancel')}
           </Button>
         </div>
-      </ExtensionUiCardShell>
+      </NativeChatOmpRpcCardShell>
     )
   }
 
   if (request.method === 'confirm') {
     return (
-      <ExtensionUiCardShell title={request.title} message={request.message} footer={timeoutNotice}>
+      <NativeChatOmpRpcCardShell
+        title={request.title}
+        message={request.message}
+        footer={timeoutNotice}
+      >
         <div className="flex gap-2">
           <Button
             type="button"
@@ -96,7 +104,7 @@ export function NativeChatExtensionUiCard({
             {translate('components.native-chat.extensionUi.cancel', 'Cancel')}
           </Button>
         </div>
-      </ExtensionUiCardShell>
+      </NativeChatOmpRpcCardShell>
     )
   }
 
@@ -110,7 +118,11 @@ export function NativeChatExtensionUiCard({
     onAnswer({ type: 'extension_ui_response', id: request.id, value: text })
   }
   return (
-    <ExtensionUiCardShell title={request.title} message={request.message} footer={timeoutNotice}>
+    <NativeChatOmpRpcCardShell
+      title={request.title}
+      message={request.message}
+      footer={timeoutNotice}
+    >
       <div className="flex gap-2">
         <Input
           autoFocus
@@ -144,38 +156,6 @@ export function NativeChatExtensionUiCard({
           {translate('components.native-chat.extensionUi.cancel', 'Cancel')}
         </Button>
       </div>
-    </ExtensionUiCardShell>
-  )
-}
-
-function ExtensionUiCardShell({
-  title,
-  message,
-  footer,
-  children
-}: {
-  title?: string
-  message?: string
-  footer: ReactNode
-  children: ReactNode
-}): React.JSX.Element {
-  return (
-    <div className="shrink-0 bg-background">
-      <div className="mx-auto w-full max-w-4xl px-3 pt-2 pb-1 sm:px-4">
-        <div className="flex w-full flex-col gap-2 rounded-lg border border-input bg-card px-4 py-3 shadow-xs">
-          <div className="flex items-start gap-2">
-            <HelpCircle className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-            <div className="min-w-0">
-              {title ? <p className="text-sm font-semibold text-foreground">{title}</p> : null}
-              {message ? (
-                <p className="mt-0.5 break-words text-xs text-muted-foreground">{message}</p>
-              ) : null}
-            </div>
-          </div>
-          {children}
-          {footer}
-        </div>
-      </div>
-    </div>
+    </NativeChatOmpRpcCardShell>
   )
 }

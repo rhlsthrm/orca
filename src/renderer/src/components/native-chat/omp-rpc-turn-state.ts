@@ -20,6 +20,14 @@ export type OmpRpcTurnStatus = 'idle' | 'working'
  *  renames it (`session_info_update`). Session-scoped, not turn-scoped. */
 export type OmpRpcSessionInfo = { title: string | null; sessionId: string | null }
 
+/** An Orca-originated interactive command card this pane is showing (`/switch`
+ *  opening a model picker). It lives in its OWN slot, never in the
+ *  extension-UI pending/queued slots above: the child is NOT blocked on it,
+ *  never sees the answer, and answering one must never resolve the other.
+ *  `cardId` is minted per open, so replacing a card cannot be confused with
+ *  re-rendering it and a stale dismissal cannot close its successor. */
+export type OmpRpcOpenInteractiveCard = { cardId: string; command: string }
+
 export type OmpRpcTurnState = {
   /** The session identity resolved during acquisition, before OMP publishes its first frame. */
   boundSessionId?: string | null
@@ -29,6 +37,8 @@ export type OmpRpcTurnState = {
   blocks: NativeChatBlock[]
   pendingExtensionUiRequest: OmpRpcExtensionUiRequestFrame | null
   queuedExtensionUiRequests: OmpRpcExtensionUiRequestFrame[]
+  /** At most one Orca-originated card per pane; a newer invocation replaces it. */
+  openInteractiveCard: OmpRpcOpenInteractiveCard | null
   latestRecap: OmpRpcRecap | null
   /** Identifies the slash command run that owns the capture slot below, and is
    *  also the wire request id that run's `prompt` was sent under — so a
@@ -98,6 +108,7 @@ export function createInitialOmpRpcTurnState(): OmpRpcTurnState {
     blocks: [],
     pendingExtensionUiRequest: null,
     queuedExtensionUiRequests: [],
+    openInteractiveCard: null,
     latestRecap: null,
     commandRunId: null,
     commandOutputText: '',

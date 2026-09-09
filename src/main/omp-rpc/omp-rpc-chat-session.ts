@@ -5,11 +5,13 @@
 import type {
   OmpRpcClientEvent,
   OmpRpcExtensionUiResponse,
-  OmpRpcImageContent
+  OmpRpcImageContent,
+  OmpSessionOwningRpcClient
 } from '../../shared/omp-rpc-protocol'
 // The IPC contract owns this union; a second local copy could drift from the
 // verb mapping below, which is the one place it is interpreted.
 import type {
+  OmpRpcChatCommandResult,
   OmpRpcChatFetchHistoryResult,
   OmpRpcChatSendBehavior,
   OmpRpcChatSendResult
@@ -20,7 +22,12 @@ import { OMP_RPC_COMMAND_RESPONSE_TIMEOUT_MS } from './omp-rpc-transport-limits'
 import type { ClaimedAgentPtyOwnerRegistry } from '../../shared/claimed-agent-pty-owner'
 import type { OmpRpcOwnedSession } from './omp-rpc-session-owner'
 
-export type { OmpRpcChatFetchHistoryResult, OmpRpcChatSendBehavior, OmpRpcChatSendResult }
+export type {
+  OmpRpcChatCommandResult,
+  OmpRpcChatFetchHistoryResult,
+  OmpRpcChatSendBehavior,
+  OmpRpcChatSendResult
+}
 
 /** See the constructor note: `events`, the only level that carries the child
  *  streams the roster row renders. */
@@ -153,15 +160,38 @@ export class OmpRpcChatSession {
      *  `prompt_result` echo with the run that sent this message. */
     requestId?: string
   }): Promise<OmpRpcChatSendResult> {
-    if (args.behavior !== 'command') {
-      return this.performSend(args)
-    }
-    // Why (XLR-029): only a COMMAND can move the child's session, and the move
-    // is adopted after its response lands — so the whole round trip, not just
-    // the read-back, is the window release must join. Armed synchronously here
-    // (never with its rejection) so a release starting right after this call
-    // still sees the gate closed.
-    const run = this.performSend(args)
+    return args.behavior === 'command'
+      ? this.gateSessionIdentity(this.performSend(args))
+      : this.performSend(args)
+  }
+
+  /** Runs one interactive-command verb against the child this pane already
+   *  owns — the model / thinking / queue-mode / compaction / session / auth
+   *  surface. Fail-closed like `send`: nothing here throws at the IPC boundary.
+   *
+   *  `movesSession` puts the call through the SAME post-command identity
+   *  read-back and settlement gate the `command` send route uses, and is
+   *  mandatory for `branch`, `new_session` and `handoff`. Those three change
+   *  the session file the child writes, and upstream announces it on no frame
+   *  at all (`handleRpcSessionChange` emits only
+   *  `available_commands_update`): without the read-back main keeps claiming —
+   *  and keeps excluding from every other pane — a session nobody is writing,
+   *  while a second pane can be handed the live one and become a second writer.
+   *  An unreadable identity therefore fails the call, exactly as on the send
+   *  route, rather than reporting a success the claim cannot back. */
+  runCommand<T>(args: {
+    movesSession?: boolean
+    run: (client: OmpSessionOwningRpcClient) => Promise<T>
+  }): Promise<OmpRpcChatCommandResult<T>> {
+    const run = this.performCommand(args)
+    return args.movesSession === true ? this.gateSessionIdentity(run) : run
+  }
+
+  /** Arms the release gate on an in-flight round trip and wakes the
+   *  command-settled listeners when it finishes (XLR-029). Called
+   *  SYNCHRONOUSLY on the promise, never on its rejection, so a release that
+   *  starts immediately after the call still finds the gate closed. */
+  private gateSessionIdentity<T>(run: Promise<T>): Promise<T> {
     const settled = run.then(
       () => undefined,
       () => undefined
@@ -175,6 +205,21 @@ export class OmpRpcChatSession {
       }
     })
     return run
+  }
+
+  private async performCommand<T>(args: {
+    movesSession?: boolean
+    run: (client: OmpSessionOwningRpcClient) => Promise<T>
+  }): Promise<OmpRpcChatCommandResult<T>> {
+    try {
+      const data = await args.run(this.owned.client)
+      if (args.movesSession === true) {
+        await this.reconcileSessionIdentity()
+      }
+      return { ok: true, data }
+    } catch (error) {
+      return { ok: false, reason: error instanceof Error ? error.message : String(error) }
+    }
   }
 
   /** Fires when a command round trip and its identity read-back finish — the

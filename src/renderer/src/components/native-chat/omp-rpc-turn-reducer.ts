@@ -49,16 +49,32 @@ import {
   appendOmpRpcToolCallBlock,
   upsertOmpRpcToolResultBlock
 } from './omp-rpc-tool-block-projection'
-import { createInitialOmpRpcTurnState, type OmpRpcTurnState } from './omp-rpc-turn-state'
+import {
+  createInitialOmpRpcTurnState,
+  type OmpRpcOpenInteractiveCard,
+  type OmpRpcTurnState
+} from './omp-rpc-turn-state'
 
 export type { OmpRpcHydratedHistory, OmpRpcSessionConfig }
 
-export type { OmpRpcSessionInfo, OmpRpcTurnState, OmpRpcTurnStatus } from './omp-rpc-turn-state'
+export type {
+  OmpRpcOpenInteractiveCard,
+  OmpRpcSessionInfo,
+  OmpRpcTurnState,
+  OmpRpcTurnStatus
+} from './omp-rpc-turn-state'
 export { createInitialOmpRpcTurnState } from './omp-rpc-turn-state'
 
 export type OmpRpcTurnAction =
   | { type: 'frame'; event: OmpRpcClientEvent }
   | { type: 'extension-ui-answered'; requestId: string }
+  /** A bare interactive command opened an Orca-originated card (`/switch`).
+   *  Distinct from `extension-ui-answered` by construction: the two live in
+   *  different slots, so neither action can resolve the other's prompt. */
+  | { type: 'interactive-card-opened'; card: OmpRpcOpenInteractiveCard }
+  /** The user answered or dismissed that card. Scoped by `cardId` so a
+   *  dismissal racing a newer invocation cannot close the newer card. */
+  | { type: 'interactive-card-dismissed'; cardId: string }
   /** A slash command was just dispatched over the owning session: retire the
    *  previous command's captured output before its frames start arriving, and
    *  take ownership of the capture slot under `commandRunId`. */
@@ -108,7 +124,12 @@ function appendTextBlock(blocks: NativeChatBlock[], delta: string): NativeChatBl
  *  its later progress frames name an id the roster no longer knows, and the
  *  roster's fail-closed admission rule drops them, so a background job that is
  *  still working would disappear from the pane for good. Terminal and attached
- *  entries still go, since neither can produce another frame worth showing. */
+ *  entries still go, since neither can produce another frame worth showing.
+ *
+ *  An open Orca-originated card rides along too, for the plainest reason: the
+ *  user opened it and nothing has answered it. A turn starting underneath it
+ *  (an unrelated prompt, a queued follow-up) is not an answer, and dropping
+ *  the card there would silently discard the interaction. */
 function carriedAcrossTurn(state: OmpRpcTurnState): Partial<OmpRpcTurnState> {
   return {
     subagents: state.subagents.filter(isOmpRpcSubagentRunningDetached),
@@ -122,7 +143,8 @@ function carriedAcrossTurn(state: OmpRpcTurnState): Partial<OmpRpcTurnState> {
     commandRunId: state.commandRunId,
     commandOutputText: state.commandOutputText,
     commandInvokedAgent: state.commandInvokedAgent,
-    commandResultReported: state.commandResultReported
+    commandResultReported: state.commandResultReported,
+    openInteractiveCard: state.openInteractiveCard
   }
 }
 
@@ -334,6 +356,18 @@ export function ompRpcTurnReducer(
   }
   if (action.type === 'extension-ui-answered') {
     return dismissExtensionUiRequest(state, action.requestId)
+  }
+  // Why these are separate branches from `extension-ui-answered` and not a
+  // shared helper: the child's pending/queued request slots and this one must
+  // stay unreachable from each other's actions. Answering an Orca card leaves
+  // a blocked child exactly as blocked as it was.
+  if (action.type === 'interactive-card-opened') {
+    return { ...state, openInteractiveCard: action.card }
+  }
+  if (action.type === 'interactive-card-dismissed') {
+    return state.openInteractiveCard?.cardId === action.cardId
+      ? { ...state, openInteractiveCard: null }
+      : state
   }
   if (action.type === 'session-identity-bound') {
     return { ...state, boundSessionId: action.sessionId }

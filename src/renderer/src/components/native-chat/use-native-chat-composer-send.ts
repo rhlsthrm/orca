@@ -53,6 +53,9 @@ export type UseNativeChatComposerSendArgs = {
   sendOmpRpcChat: (text: string) => boolean
   /** A catalog slash command routed through that same owned session. */
   sendOmpRpcCommand: (text: string) => boolean
+  /** A bare interactive command answered by Orca's own card instead of the
+   *  wire (`/switch` opens the model picker). */
+  openOmpRpcCommandCard: (text: string) => boolean
   onSlashCommand?: (command: string, outcome?: NativeChatCommandMarkerOutcome) => void
   onOptimisticSend?: (text: string, imagePaths?: string[]) => string | undefined
   sessionOptionsSurface: NativeChatPtySessionOptionsSurface | null
@@ -85,6 +88,7 @@ export function useNativeChatComposerSend(
     sendOmpLocalCommand,
     sendOmpRpcChat,
     sendOmpRpcCommand,
+    openOmpRpcCommandCard,
     onSlashCommand,
     onOptimisticSend,
     sessionOptionsSurface,
@@ -132,6 +136,22 @@ export function useNativeChatComposerSend(
         return
       }
       const classification = classifySend(text)
+      // Why FIRST among the command routes: for a command OMP publishes, the
+      // route below would send text OMP answers with a degraded one-liner
+      // (`/switch` prints the current model instead of opening its picker),
+      // and for one it does not publish, that route declines and the draft
+      // ends up as a prompt for the model. Neither is what the user asked
+      // for. Nothing is put on the wire here — the card's own answer
+      // dispatches a verb — so no send telemetry and no outgoing-command
+      // record, and the draft is consumed because the card now carries it.
+      if (classification !== 'chat' && imagePaths.length === 0 && openOmpRpcCommandCard(text)) {
+        setHistory((prev) => pushHistory(prev, text))
+        setDraft('')
+        setCaret(0)
+        clearSkillOrigin()
+        setNotice(null)
+        return
+      }
       // Why: a catalog command on an RPC-owned pane has no PTY left to type into,
       // so it runs over the owning session. Asked before the session-less probe
       // below because only this call can tell whether OMP's published catalog
@@ -280,6 +300,7 @@ export function useNativeChatComposerSend(
       sendOmpLocalCommand,
       sendOmpRpcChat,
       sendOmpRpcCommand,
+      openOmpRpcCommandCard,
       structuredTransport,
       sendStructured,
       hasPendingAttachment,

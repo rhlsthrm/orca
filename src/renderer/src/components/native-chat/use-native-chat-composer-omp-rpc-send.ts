@@ -9,6 +9,8 @@ import type { NativeChatCommandMarkerOutcome } from './native-chat-command-marke
 import type { NativeChatComposerOmpRpcBinding } from './native-chat-composer-types'
 import { useOmpRpcChatSend } from './use-omp-rpc-chat-send'
 import { useOmpRpcCommandSend } from './use-omp-rpc-command-send'
+import { isOmpRpcCatalogAgent } from './omp-rpc-command-catalog'
+import { findOmpRpcInteractiveCommandCard } from './omp-rpc-interactive-command-registry'
 
 export const OMP_RPC_CHAT_DISABLED: NativeChatComposerOmpRpcBinding = {
   isOwned: false,
@@ -34,6 +36,9 @@ export type NativeChatComposerOmpRpcSend = {
   sendOmpRpcChat: (text: string) => boolean
   /** Routes a catalog slash command through the owning session (open item 4). */
   sendOmpRpcCommand: (text: string) => boolean
+  /** Claims a bare interactive command by opening its Orca-rendered card.
+   *  `false` means the draft keeps whichever route it has today. */
+  openOmpRpcCommandCard: (text: string) => boolean
   /** Present only while an RPC-owned pane's turn is streaming. The toggle
    *  applies to one send, then clears before another message can inherit it. */
   followUp: NativeChatComposerFollowUp | null
@@ -99,6 +104,25 @@ export function useNativeChatComposerOmpRpcSend(
     ompRpcChat.isOwned && ompRpcChat.isTurnWorking
       ? { active: followUpRequested, onToggle: () => setFollowUpRequested((value) => !value) }
       : null
+  // Why this claim exists at all: over RPC a command carrying both a text
+  // handler and a TUI overlay degrades to the text one (`/switch` prints the
+  // current model), and a TUI-only command is not a command over the wire at
+  // all — its raw text reaches the model as a prompt. A BARE invocation of a
+  // registered command therefore opens Orca's card instead. An argumented
+  // invocation never matches a card, so `/switch gpt-6-astra` still goes
+  // straight to the session route below.
+  const openOmpRpcCommandCard = (text: string): boolean => {
+    const openCard = ompRpcChat.openInteractiveCard
+    if (!ompRpcChat.isOwned || !openCard || !isOmpRpcCatalogAgent(agent)) {
+      return false
+    }
+    const card = findOmpRpcInteractiveCommandCard(text)
+    if (!card) {
+      return false
+    }
+    openCard(card.command)
+    return true
+  }
 
-  return { sendOmpRpcChat, sendOmpRpcCommand, followUp }
+  return { sendOmpRpcChat, sendOmpRpcCommand, openOmpRpcCommandCard, followUp }
 }

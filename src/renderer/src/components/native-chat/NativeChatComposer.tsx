@@ -20,8 +20,6 @@ import { useNativeChatSessionOptions } from './use-native-chat-session-options'
 import { useNativeChatFileAttachmentActions } from './use-native-chat-file-attachment-actions'
 import { useNativeChatDictationActions } from './use-native-chat-dictation-actions'
 import { useNativeChatSessionOptionCommand } from './use-native-chat-session-option-command'
-import { useNativeChatComposerCatalog } from './use-native-chat-composer-catalog'
-import { useOmpRpcCommands, useOmpRpcProbeCwd } from './use-omp-rpc-commands'
 import { useOmpRpcLocalCommandSend } from './use-omp-rpc-local-command-send'
 import { useNativeChatComposerCommandFailureNotice } from './use-native-chat-composer-command-failure-notice'
 import {
@@ -29,7 +27,7 @@ import {
   useNativeChatComposerOmpRpcSend
 } from './use-native-chat-composer-omp-rpc-send'
 import { useNativeChatComposerSend } from './use-native-chat-composer-send'
-import { useNativeChatPickerState } from './use-native-chat-picker-state'
+import { useNativeChatComposerCommandPicker } from './use-native-chat-composer-command-picker'
 import { useNativeChatPickerCommandDispatch } from './use-native-chat-picker-command-dispatch'
 import { useNativeChatTypedInsertion } from './use-native-chat-typed-insertion'
 import type {
@@ -116,23 +114,14 @@ const NativeChatComposerPane = forwardRef<NativeChatComposerHandle, NativeChatCo
       dictationState === 'listening' ||
       dictationState === 'stopping'
 
-    const { agentCommands: staticAgentCommands, sessionSkillNames } =
-      useNativeChatComposerCatalog(agent, structuredTransport)
-    const agentCommands = useOmpRpcCommands(
-      agent,
-      terminalTabId,
-      staticAgentCommands,
-      ompRpcChat.commands
-    )
-    const ompRpcCwd = useOmpRpcProbeCwd(agent, terminalTabId)
-    const picker = useNativeChatPickerState({
+    const { picker, ompRpcCwd } = useNativeChatComposerCommandPicker({
       agent,
       terminalTabId,
       draftScopeKey: paneKey,
       draft,
       caret,
-      agentCommands,
-      sessionSkillNames,
+      structuredTransport,
+      sessionCommands: ompRpcChat.commands,
       textareaRef,
       setDraft,
       setCaret,
@@ -261,14 +250,15 @@ const NativeChatComposerPane = forwardRef<NativeChatComposerHandle, NativeChatCo
       onSlashCommand,
       setNotice
     })
-    const { sendOmpRpcChat, sendOmpRpcCommand, followUp } = useNativeChatComposerOmpRpcSend({
-      agent,
-      ompRpcChat,
-      onOptimisticSend,
-      onOptimisticSendCanceled,
-      onSlashCommand,
-      setNotice
-    })
+    const { sendOmpRpcChat, sendOmpRpcCommand, openOmpRpcCommandCard, followUp } =
+      useNativeChatComposerOmpRpcSend({
+        agent,
+        ompRpcChat,
+        onOptimisticSend,
+        onOptimisticSendCanceled,
+        onSlashCommand,
+        setNotice
+      })
 
     const send = useNativeChatComposerSend({
       agent,
@@ -287,6 +277,7 @@ const NativeChatComposerPane = forwardRef<NativeChatComposerHandle, NativeChatCo
       sendOmpLocalCommand,
       sendOmpRpcChat,
       sendOmpRpcCommand,
+      openOmpRpcCommandCard,
       onSlashCommand,
       onOptimisticSend,
       sessionOptionsSurface: ptySessionOptionsSurface,
@@ -316,6 +307,7 @@ const NativeChatComposerPane = forwardRef<NativeChatComposerHandle, NativeChatCo
       agent,
       ompRpcCwd,
       sendOmpRpcCommand,
+      openOmpRpcCommandCard,
       disabled,
       isDispatchingSessionOption,
       resolveTarget,

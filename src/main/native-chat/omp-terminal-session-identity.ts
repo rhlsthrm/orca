@@ -147,6 +147,19 @@ export function encodeOmpSessionCwdBucket(
   return `--${encodeAbsoluteCwd(normalizedCwd)}--`
 }
 
+/** `<agentDir>/sessions/<bucket>` — the directory holding every session file
+ *  OMP would offer for this cwd. Exported because the resumable-session
+ *  enumerator (omp-resumable-sessions.ts) has to walk the same directory the
+ *  mtime fallback below walks; two independent compositions of the agent dir,
+ *  the `sessions` segment and the bucket encoding is exactly the kind of
+ *  drift that silently points one of them at an empty directory. */
+export function ompSessionBucketDir(
+  cwd: string,
+  options?: ResolveOmpPaneSessionIdentityOptions
+): string {
+  return join(ompAgentDir(options), 'sessions', encodeOmpSessionCwdBucket(cwd, options))
+}
+
 export type OmpTerminalBreadcrumb = {
   cwd: string
   /** Null when the breadcrumb records a lazily-unmaterialized `/new` boundary. */
@@ -229,7 +242,7 @@ async function resolveNewestSessionFileInBucket(
   cwd: string,
   options?: ResolveOmpPaneSessionIdentityOptions
 ): Promise<string | null> {
-  const bucketDir = join(ompAgentDir(options), 'sessions', encodeOmpSessionCwdBucket(cwd, options))
+  const bucketDir = ompSessionBucketDir(cwd, options)
   let entries: Dirent[]
   try {
     entries = await readdir(bucketDir, { withFileTypes: true })

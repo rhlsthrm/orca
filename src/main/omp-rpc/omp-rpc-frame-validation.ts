@@ -1,3 +1,10 @@
+// Readers for OMP's SERVER-PUSHED frame shapes (ready, session_info_update,
+// config_update, message_update, agent_end, extension_ui_request) plus the two
+// pulled payloads whose envelope is frame-shaped (session state, message
+// page). The per-value readers these compose live in
+// omp-rpc-wire-value-readers.ts and the per-verb command-response readers in
+// omp-rpc-command-response-validation.ts; the dependency runs one way.
+
 import type {
   OmpRpcAgentEndFrame,
   OmpRpcAssistantMessageEvent,
@@ -17,10 +24,22 @@ import {
   OMP_RPC_MAX_MESSAGE_CURSOR_CHARS,
   OMP_RPC_PROTOCOL_VERSION
 } from './omp-rpc-transport-limits'
+import {
+  isOmpRpcObject,
+  parseOmpRpcContextUsage,
+  parseOmpRpcInterruptMode,
+  parseOmpRpcModel,
+  parseOmpRpcQueueMode,
+  parseOmpRpcThinkingLevel,
+  parseOmpRpcTodoPhases,
+  readWireBoolean
+} from './omp-rpc-wire-value-readers'
 
-export function isOmpRpcObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
+// The object guard is re-exported because every frame-side module reads its
+// frames through this entry point (the inbound router, the dispatcher, the
+// subagent and tool-execution readers, the turn settlers). Its home is
+// omp-rpc-wire-value-readers.ts, next to the other value-level readers.
+export { isOmpRpcObject }
 
 export function parseOmpRpcReadyFrame(value: unknown): OmpRpcReadyFrame | null {
   if (!isOmpRpcObject(value) || value.type !== 'ready' || value.protocolVersion !== 1) {
@@ -122,6 +141,12 @@ export function parseOmpRpcConfigUpdateFrame(frame: unknown): OmpRpcConfigUpdate
   return frame as OmpRpcConfigUpdateFrame
 }
 
+/** The five ownership-critical fields stay hard requirements — a state read is
+ *  how the owner proves which session the child is writing. Everything the
+ *  interactive-command surfaces read is optional and degrades to undefined:
+ *  OMP omits fields per release and per model, and a reader that turned "OMP
+ *  said nothing" into `false` would make a toggle card assert the opposite of
+ *  the child's real setting. Unknown must stay distinguishable from off. */
 export function parseOmpRpcSessionState(data: unknown): OmpRpcSessionState {
   if (
     !isOmpRpcObject(data) ||
@@ -134,7 +159,24 @@ export function parseOmpRpcSessionState(data: unknown): OmpRpcSessionState {
   ) {
     throw new Error('OMP RPC session state response was malformed')
   }
-  return data as OmpRpcSessionState
+  return {
+    ...(data as OmpRpcSessionState),
+    sessionName: typeof data.sessionName === 'string' ? data.sessionName : undefined,
+    model: parseOmpRpcModel(data.model),
+    thinkingLevel: parseOmpRpcThinkingLevel(data.thinkingLevel),
+    steeringMode: parseOmpRpcQueueMode(data.steeringMode),
+    followUpMode: parseOmpRpcQueueMode(data.followUpMode),
+    interruptMode: parseOmpRpcInterruptMode(data.interruptMode),
+    autoCompactionEnabled: readWireBoolean(data.autoCompactionEnabled),
+    fastModeEnabled: readWireBoolean(data.fastModeEnabled),
+    fastModeActive: readWireBoolean(data.fastModeActive),
+    messageCount:
+      Number.isSafeInteger(data.messageCount) && (data.messageCount as number) >= 0
+        ? (data.messageCount as number)
+        : undefined,
+    todoPhases: parseOmpRpcTodoPhases(data.todoPhases),
+    contextUsage: parseOmpRpcContextUsage(data.contextUsage)
+  }
 }
 
 /** `get_messages_page` payload. `nextCursor` is echoed straight back upstream, so

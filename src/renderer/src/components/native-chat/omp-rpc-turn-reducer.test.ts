@@ -474,7 +474,6 @@ describe('extension-ui request queueing', () => {
     expect(emptyOptions.pendingExtensionUiRequest).toBeNull()
   })
 })
-
 describe('history hydration', () => {
   const hydrated = (id: string, text: string): NativeChatMessage => ({
     id,
@@ -735,7 +734,7 @@ describe('history hydration', () => {
         type: 'session-identity-bound',
         sessionId: 'session-a'
       }),
-      frame({ kind: 'session-info', title: 'b', sessionId: 'session-b' }),
+      frame({ kind: 'session-info', title: 'b', sessionId: 'session-b' })
     )
 
     expect(switched.assistantText).toBe('')

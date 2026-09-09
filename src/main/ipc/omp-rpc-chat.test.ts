@@ -1,6 +1,7 @@
 import { describe, expect, it, vi, beforeEach } from 'vitest'
 import type { OmpRpcChatEventPayload } from '../../shared/omp-rpc-chat-ipc-contract'
-import type { OmpRpcClientEvent } from '../../shared/omp-rpc-protocol'
+import type { OmpRpcClientEvent, OmpSessionOwningRpcClient } from '../../shared/omp-rpc-protocol'
+import { OmpRpcChatSession } from '../omp-rpc/omp-rpc-chat-session'
 
 const {
   handle,
@@ -126,7 +127,10 @@ describe('OMP RPC chat IPC handlers', () => {
     getAllWebContents.mockReturnValue([])
   })
 
-  it('registers resolveSessionIdentity/acquire/release/fetchHistory/send/abort/respond and the subscribe push channels', () => {
+  // Exhaustive on purpose: this is the registration manifest. A channel the
+  // preload invokes but main never registers does not error — the renderer's
+  // `invoke` just never settles.
+  it('registers the ownership channels, the interactive-command channels and the subscribe push channels', () => {
     registerOmpRpcChatHandlers()
     expect(handle.mock.calls.map(([channel]) => channel)).toEqual([
       'ompRpcChat:resolveSessionIdentity',
@@ -138,7 +142,37 @@ describe('OMP RPC chat IPC handlers', () => {
       'ompRpcChat:fetchHistory',
       'ompRpcChat:send',
       'ompRpcChat:abort',
-      'ompRpcChat:respondExtensionUi'
+      'ompRpcChat:respondExtensionUi',
+      'ompRpcChat:getState',
+      'ompRpcChat:getAvailableModels',
+      'ompRpcChat:setModel',
+      'ompRpcChat:cycleModel',
+      'ompRpcChat:setThinkingLevel',
+      'ompRpcChat:cycleThinkingLevel',
+      'ompRpcChat:setSteeringMode',
+      'ompRpcChat:setFollowUpMode',
+      'ompRpcChat:setInterruptMode',
+      'ompRpcChat:setFastMode',
+      'ompRpcChat:compact',
+      'ompRpcChat:setAutoCompaction',
+      'ompRpcChat:setAutoRetry',
+      'ompRpcChat:abortRetry',
+      'ompRpcChat:switchSession',
+      'ompRpcChat:branch',
+      'ompRpcChat:getBranchMessages',
+      'ompRpcChat:setSessionName',
+      'ompRpcChat:handoff',
+      'ompRpcChat:newSession',
+      'ompRpcChat:getSessionStats',
+      'ompRpcChat:exportHtml',
+      'ompRpcChat:getLoginProviders',
+      'ompRpcChat:login',
+      'ompRpcChat:getMessages',
+      'ompRpcChat:getSubagents',
+      'ompRpcChat:setTodos',
+      // Registered by omp-rpc-chat-resumable-sessions.ts, from this module, so
+      // the resume enumerator stays in the same manifest a renderer relies on.
+      'ompRpcChat:listResumableSessions'
     ])
     expect(on.mock.calls.map(([channel]) => channel)).toEqual([
       'ompRpcChat:subscribe',
@@ -326,10 +360,10 @@ describe('OMP RPC chat IPC handlers', () => {
 
     expect(resolveOmpRpcLaunch).toHaveBeenCalledWith('"/opt/omp-v2/bin/omp" --protocol v2')
     expect(registryInstance.acquire).toHaveBeenCalledWith(
-        expect.objectContaining({
-          executablePath: '/opt/omp-v2/bin/omp',
-          commandArgs: ['--protocol', 'v2']
-        })
+      expect.objectContaining({
+        executablePath: '/opt/omp-v2/bin/omp',
+        commandArgs: ['--protocol', 'v2']
+      })
     )
   })
 
@@ -724,5 +758,135 @@ describe('OMP RPC chat IPC handlers', () => {
       fireOn('ompRpcChat:subscribe', { sender }, { paneKey: 'tab:leaf', subscriptionId: 'sub-1' })
     ).not.toThrow()
     expect(send).not.toHaveBeenCalled()
+  })
+
+  describe('interactive commands', () => {
+    /** A real OmpRpcChatSession over a stub client, so these exercise the
+     *  handler -> session -> client path rather than a mocked session. */
+    function ownSession(client: Partial<OmpSessionOwningRpcClient>) {
+      const getState = vi.fn(async () => ({
+        sessionFile: '/sessions/a.jsonl',
+        sessionId: 'session-a',
+        isStreaming: false,
+        isCompacting: false,
+        queuedMessageCount: 0
+      }))
+      const owned = {
+        client: {
+          getCommands: vi.fn(async () => []),
+          setSubagentSubscription: vi.fn(async () => 'events'),
+          getState,
+          on: () => () => {},
+          ...client
+        },
+        owner: {}
+      }
+      registryInstance.get.mockReturnValue(
+        new OmpRpcChatSession(owned as never, '/sessions/a.jsonl')
+      )
+      return { getState }
+    }
+
+    it('runs the verb against the session the pane owns and returns its payload', async () => {
+      const models = [{ id: 'gpt-6-astra', name: 'GPT-6 Astra', provider: 'openai-codex' }]
+      ownSession({ getAvailableModels: vi.fn(async () => models) })
+      registerOmpRpcChatHandlers()
+
+      await expect(
+        invoke('ompRpcChat:getAvailableModels', { paneKey: 'tab:leaf' })
+      ).resolves.toEqual({ ok: true, data: models })
+    })
+
+    it('forwards the arguments the verb needs verbatim', async () => {
+      const setModel = vi.fn(async () => ({
+        id: 'claude-opus-5',
+        name: 'Claude Opus 5',
+        provider: 'anthropic'
+      }))
+      ownSession({ setModel })
+      registerOmpRpcChatHandlers()
+
+      await invoke('ompRpcChat:setModel', {
+        paneKey: 'tab:leaf',
+        provider: 'anthropic',
+        modelId: 'claude-opus-5'
+      })
+
+      expect(setModel).toHaveBeenCalledWith({ provider: 'anthropic', modelId: 'claude-opus-5' })
+    })
+
+    // The three verbs that change the session file the child writes must
+    // reconcile the pane's claim, or main keeps claiming — and keeps excluding
+    // from every other pane — a session nobody is writing (XLR-018). The state
+    // read is the observable proof the read-back ran.
+    it.each([
+      ['ompRpcChat:branch', { entryId: 'entry-7' }, 'branch'],
+      ['ompRpcChat:handoff', {}, 'handoff'],
+      ['ompRpcChat:newSession', {}, 'newSession'],
+      ['ompRpcChat:switchSession', { sessionPath: '/sessions/b.jsonl' }, 'switchSession']
+    ] as const)('reconciles the session identity after %s', async (channel, args, verb) => {
+      const { getState } = ownSession({
+        branch: vi.fn(async () => ({ text: 'turn', cancelled: false })),
+        handoff: vi.fn(async () => null),
+        newSession: vi.fn(async () => ({ cancelled: false })),
+        switchSession: vi.fn(async () => {})
+      })
+      registerOmpRpcChatHandlers()
+
+      const result = await invoke(channel, { paneKey: 'tab:leaf', ...args })
+
+      expect(result).toMatchObject({ ok: true })
+      expect(getState, `${verb} must read the child's identity back`).toHaveBeenCalledTimes(1)
+    })
+
+    // `/resume` must not go through acquire: re-acquiring releases the pane's
+    // existing registration first, and an empty ptyId then proves no PTY exit,
+    // so the pane would end up with neither RPC ownership nor a terminal. It
+    // drives the session the pane already owns instead.
+    it('resumes through the pane it already owns, never a re-acquisition', async () => {
+      ownSession({ switchSession: vi.fn(async () => {}) })
+      registerOmpRpcChatHandlers()
+
+      await invoke('ompRpcChat:switchSession', {
+        paneKey: 'tab:leaf',
+        sessionPath: '/sessions/b.jsonl'
+      })
+
+      expect(registryInstance.acquire).not.toHaveBeenCalled()
+      expect(registryInstance.release).not.toHaveBeenCalled()
+    })
+
+    it('does not read the identity back for a verb that cannot move the session', async () => {
+      const { getState } = ownSession({ abortRetry: vi.fn(async () => {}) })
+      registerOmpRpcChatHandlers()
+
+      await invoke('ompRpcChat:abortRetry', { paneKey: 'tab:leaf' })
+
+      expect(getState).not.toHaveBeenCalled()
+    })
+
+    it('refuses a pane main does not own instead of throwing across IPC', async () => {
+      registryInstance.get.mockReturnValue(null)
+      registerOmpRpcChatHandlers()
+
+      await expect(invoke('ompRpcChat:compact', { paneKey: 'other:leaf' })).resolves.toEqual({
+        ok: false,
+        reason: 'no RPC-owned session for this pane'
+      })
+    })
+
+    it('reports a refused wire command as a reason rather than rejecting', async () => {
+      ownSession({
+        handoff: vi.fn(async () => {
+          throw new Error('Cannot hand off while a response is in progress')
+        })
+      })
+      registerOmpRpcChatHandlers()
+
+      await expect(invoke('ompRpcChat:handoff', { paneKey: 'tab:leaf' })).resolves.toEqual({
+        ok: false,
+        reason: 'Cannot hand off while a response is in progress'
+      })
+    })
   })
 })

@@ -8,6 +8,16 @@ import type {
   OmpRpcSubagentProgressFrame,
   OmpRpcSubagentSubscriptionLevel
 } from './omp-rpc-subagent-protocol'
+import type {
+  OmpRpcConfigModel,
+  OmpRpcInteractiveCommand,
+  OmpRpcInteractiveCommandClient,
+  OmpRpcSessionState
+} from './omp-rpc-interactive-protocol'
+
+// The interactive-command surface is re-exported verbatim so this module stays
+// the single import site for the whole contract.
+export * from './omp-rpc-interactive-protocol'
 
 /** First frame OMP emits on stdout; protocolVersion is literally 1 pre-negotiation. */
 export type OmpRpcReadyFrame = {
@@ -91,15 +101,6 @@ export type OmpRpcSessionInfoUpdateFrame = {
   sessionId?: string | null
 }
 
-/** The model half of a `config_update`. Upstream this is the catalog's full
- *  `Model` interface (100+ fields); only the three this integration reads are
- *  typed, the rest passes through — a floor, not a ceiling (D3). */
-export type OmpRpcConfigModel = {
-  id?: string
-  name?: string
-  provider?: string
-} & Record<string, unknown>
-
 /** Builtin slash-command side channel: the session's model/thinking selection
  *  after `/model` or `/move` (`notifyConfigChanged`). `thinkingLevel` is
  *  OMP's `ThinkingLevel` union (inherit/off/minimal/low/medium/high/xhigh/max)
@@ -108,14 +109,6 @@ export type OmpRpcConfigUpdateFrame = {
   type: 'config_update'
   model?: OmpRpcConfigModel | null
   thinkingLevel?: string | null
-}
-
-export type OmpRpcSessionState = {
-  sessionFile: string | null
-  sessionId: string | null
-  isStreaming: boolean
-  isCompacting: boolean
-  queuedMessageCount: number
 }
 
 /** One entry of a history page. Upstream this is OMP's full `AgentMessage`
@@ -318,6 +311,7 @@ export type OmpRpcCommand =
       type: 'set_subagent_subscription'
       level: OmpRpcSubagentSubscriptionLevel
     }
+  | OmpRpcInteractiveCommand
 
 /** Events the main-process client emits to consumers (IPC layer, tests). */
 export type OmpRpcClientEvent =
@@ -415,20 +409,25 @@ export type OmpRpcClientLike = {
   whenExited(): Promise<OmpRpcExit>
 }
 
-export type OmpSessionOwningRpcClient = OmpRpcClientLike & {
-  getState(): Promise<OmpRpcSessionState>
-  /** One raw `get_messages_page` request. Strict by design — it never falls back
-   *  to the legacy monolithic `get_messages`, so a caller can never silently mix
-   *  two snapshots. Prefer `fetchHistory` unless you are driving the walk. */
-  getMessagesPage(options?: { cursor?: string; limit?: number }): Promise<OmpRpcMessagesPage>
-  /** Drains the whole paged history for the session this client owns, proving
-   *  the walk covered exactly `totalMessages` messages with no repeated cursor. */
-  fetchHistory(options?: { limit?: number }): Promise<OmpRpcHistoryResult>
-  /** Turns on subagent forwarding, which defaults to `off`. Resolves with the
-   *  level the server actually selected — the client never assumes its own. */
-  setSubagentSubscription(
-    level: OmpRpcSubagentSubscriptionLevel
-  ): Promise<OmpRpcSubagentSubscriptionLevel>
-  switchSession(sessionPath: string): Promise<void>
-  abort(): Promise<void>
-}
+export type OmpSessionOwningRpcClient = OmpRpcClientLike &
+  OmpRpcInteractiveCommandClient & {
+    getState(): Promise<OmpRpcSessionState>
+    /** One raw `get_messages_page` request. Strict by design — it never falls back
+     *  to the legacy monolithic `get_messages`, so a caller can never silently mix
+     *  two snapshots. Prefer `fetchHistory` unless you are driving the walk. */
+    getMessagesPage(options?: { cursor?: string; limit?: number }): Promise<OmpRpcMessagesPage>
+    /** Drains the whole paged history for the session this client owns, proving
+     *  the walk covered exactly `totalMessages` messages with no repeated cursor. */
+    fetchHistory(options?: { limit?: number }): Promise<OmpRpcHistoryResult>
+    /** Turns on subagent forwarding, which defaults to `off`. Resolves with the
+     *  level the server actually selected — the client never assumes its own. */
+    setSubagentSubscription(
+      level: OmpRpcSubagentSubscriptionLevel
+    ): Promise<OmpRpcSubagentSubscriptionLevel>
+    switchSession(sessionPath: string): Promise<void>
+    abort(): Promise<void>
+    /** The whole message list in one frame. `fetchHistory` is the paged walk and
+     *  the right default; this exists for a caller that needs the child's own
+     *  unpaged snapshot (e.g. after a branch, where cursors are invalidated). */
+    getMessages(): Promise<OmpRpcHistoryMessage[]>
+  }

@@ -178,6 +178,87 @@ describe('OMP RPC session ownership commands', () => {
     })
   })
 
+  // The interactive surfaces read `get_state` to display the child's CURRENT
+  // selection. OMP omits these fields per release and per model, so "OMP said
+  // nothing" has to stay distinguishable from "off" — a toggle that renders a
+  // missing field as `false` asserts the opposite of the child's real setting.
+  it('reports an omitted interactive field as unknown rather than off', async () => {
+    const client = spawnSessionScenario({
+      sessionState: {
+        sessionFile: '/sessions/first.jsonl',
+        sessionId: 'session-first',
+        isStreaming: false,
+        isCompacting: false,
+        queuedMessageCount: 0
+      }
+    })
+
+    const state = await client.getState()
+
+    expect(state.autoCompactionEnabled).toBeUndefined()
+    expect(state.fastModeEnabled).toBeUndefined()
+    expect(state.fastModeActive).toBeUndefined()
+    expect(state.steeringMode).toBeUndefined()
+    expect(state.thinkingLevel).toBeUndefined()
+    expect(state.model).toBeUndefined()
+  })
+
+  it('drops an interactive field whose wire value is not one this build knows', async () => {
+    const client = spawnSessionScenario({
+      sessionState: {
+        sessionFile: '/sessions/first.jsonl',
+        sessionId: 'session-first',
+        isStreaming: false,
+        isCompacting: false,
+        queuedMessageCount: 0,
+        // A future OMP mode, a non-boolean toggle and a catalog row with no
+        // provider: none may be substituted, coerced or passed through.
+        steeringMode: 'round-robin',
+        autoCompactionEnabled: 'yes',
+        model: { id: 'half-a-model' }
+      } as unknown as OmpRpcSessionState
+    })
+
+    const state = await client.getState()
+
+    expect(state.steeringMode).toBeUndefined()
+    expect(state.autoCompactionEnabled).toBeUndefined()
+    expect(state.model).toBeUndefined()
+    // Still a usable state read: the ownership fields are untouched.
+    expect(state).toMatchObject({ sessionId: 'session-first', isStreaming: false })
+  })
+
+  it('reads the interactive fields it can trust', async () => {
+    const client = spawnSessionScenario({
+      sessionState: {
+        sessionFile: '/sessions/first.jsonl',
+        sessionId: 'session-first',
+        isStreaming: false,
+        isCompacting: false,
+        queuedMessageCount: 0,
+        steeringMode: 'one-at-a-time',
+        interruptMode: 'wait',
+        autoCompactionEnabled: true,
+        fastModeEnabled: false,
+        thinkingLevel: 'xhigh',
+        model: { id: 'gpt-6-astra', name: 'GPT-6 Astra', provider: 'openai-codex' },
+        contextUsage: { tokens: 1_000, contextWindow: 400_000, percent: 0.25 },
+        todoPhases: [{ name: 'wire', tasks: [{ content: 'ship', status: 'in_progress' }] }]
+      }
+    })
+
+    await expect(client.getState()).resolves.toMatchObject({
+      steeringMode: 'one-at-a-time',
+      interruptMode: 'wait',
+      autoCompactionEnabled: true,
+      fastModeEnabled: false,
+      thinkingLevel: 'xhigh',
+      model: { id: 'gpt-6-astra', provider: 'openai-codex' },
+      contextUsage: { tokens: 1_000, contextWindow: 400_000, percent: 0.25 },
+      todoPhases: [{ name: 'wire', tasks: [{ content: 'ship', status: 'in_progress' }] }]
+    })
+  })
+
   // Reading the level back off the server's own response is the point: a
   // client that assumed its request took would wait forever for forwarded
   // frames the server never turned on.
@@ -670,6 +751,61 @@ describe('OMP RPC history hydration', () => {
       )
       await vi.advanceTimersByTimeAsync(OMP_RPC_COMMAND_RESPONSE_TIMEOUT_MS * 3)
       expect(settled).toBe(false)
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  // `compact`/`handoff` run the child's summarizer and `login` waits on an
+  // OAuth round trip upstream itself gives 600s. Deadlining any of them would
+  // reject the caller while the work carried on: the compaction still lands,
+  // the handoff document still gets written, the credential still gets
+  // persisted — and the UI reports a failure for work that succeeded.
+  it.each(['compact', 'handoff', 'login'] as const)(
+    'leaves %s without a deadline',
+    async (verb) => {
+      const client = spawnSessionScenario({ swallowCommands: [verb] })
+      await client.whenReady()
+
+      vi.useFakeTimers()
+      try {
+        let settled = false
+        const run =
+          verb === 'compact'
+            ? client.compact()
+            : verb === 'handoff'
+              ? client.handoff()
+              : client.login('anthropic')
+        void run.then(
+          () => {
+            settled = true
+          },
+          () => {
+            settled = true
+          }
+        )
+        await vi.advanceTimersByTimeAsync(OMP_RPC_COMMAND_RESPONSE_TIMEOUT_MS * 3)
+        expect(settled).toBe(false)
+      } finally {
+        vi.useRealTimers()
+      }
+    }
+  )
+
+  // The exemption above must stay targeted: an interactive QUERY that hangs is
+  // the XLR-016 shape, and every bounded wait downstream depends on it failing.
+  it('still deadlines an interactive query that never answers', async () => {
+    const client = spawnSessionScenario({ swallowCommands: ['get_available_models'] })
+    await client.whenReady()
+
+    vi.useFakeTimers()
+    try {
+      const models = client.getAvailableModels()
+      const assertion = expect(models).rejects.toThrow(
+        `OMP RPC get_available_models did not answer within ${OMP_RPC_COMMAND_RESPONSE_TIMEOUT_MS}ms`
+      )
+      await vi.advanceTimersByTimeAsync(OMP_RPC_COMMAND_RESPONSE_TIMEOUT_MS)
+      await assertion
     } finally {
       vi.useRealTimers()
     }

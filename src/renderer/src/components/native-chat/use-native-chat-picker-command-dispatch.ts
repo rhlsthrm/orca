@@ -28,6 +28,9 @@ export function useNativeChatPickerCommandDispatch(args: {
   /** Sends a catalog command over the RPC session owning this pane; `false`
    *  means it declined and the PTY path below still applies. */
   sendOmpRpcCommand?: (text: string) => boolean
+  /** Claims a bare interactive command by opening Orca's card for it, exactly
+   *  as typing it does; `false` means the routes below still apply. */
+  openOmpRpcCommandCard?: (text: string) => boolean
   disabled: boolean
   isDispatchingSessionOption: boolean
   resolveTarget: () => NativeChatResolvedTarget | null
@@ -46,6 +49,7 @@ export function useNativeChatPickerCommandDispatch(args: {
     agent,
     ompRpcCwd = null,
     sendOmpRpcCommand,
+    openOmpRpcCommandCard,
     disabled,
     isDispatchingSessionOption,
     resolveTarget,
@@ -64,6 +68,21 @@ export function useNativeChatPickerCommandDispatch(args: {
     (command) => {
       const text = `/${command.name}`
       if (disabled || isDispatchingSessionOption) {
+        return
+      }
+      // Why before every send route: picking `/switch` from the menu must
+      // behave exactly like typing it — Orca's own card, not the degraded text
+      // answer the wire would give. Nothing is sent, so this records no
+      // outgoing command and no message-sent telemetry; the card's answer
+      // dispatches the verb and writes the marker.
+      if (openOmpRpcCommandCard?.(text)) {
+        emitNativeChatPickerItemAccepted({ agent, itemKind: 'command' })
+        setHistory((previous) => pushHistory(previous, text))
+        setDraft('')
+        setCaret(0)
+        setActiveSuggestion(0)
+        clearSkillOrigin()
+        setNotice(null)
         return
       }
       // Why: on an RPC-owned pane the PTY is gone by design, so a catalog
@@ -166,6 +185,7 @@ export function useNativeChatPickerCommandDispatch(args: {
       ompRpcCwd,
       onSlashCommand,
       resolveTarget,
+      openOmpRpcCommandCard,
       sendOmpRpcCommand,
       sessionOptionsSurface,
       setActiveSuggestion,

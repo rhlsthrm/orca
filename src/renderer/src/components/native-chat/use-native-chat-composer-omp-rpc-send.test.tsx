@@ -118,4 +118,53 @@ describe('useNativeChatComposerOmpRpcSend', () => {
 
     expect(reportMessageFailure).toHaveBeenCalledWith(7)
   })
+
+  describe('openOmpRpcCommandCard', () => {
+    function claim(
+      text: string,
+      binding: { isOwned?: boolean; agent?: 'omp' | 'claude' } = {}
+    ): { claimed: boolean; openInteractiveCard: ReturnType<typeof vi.fn> } {
+      const openInteractiveCard = vi.fn()
+      const hook = renderHook(() =>
+        useNativeChatComposerOmpRpcSend({
+          agent: binding.agent ?? 'omp',
+          ompRpcChat: {
+            isOwned: binding.isOwned ?? true,
+            isTurnWorking: false,
+            send: vi.fn().mockResolvedValue({ ok: true }),
+            openInteractiveCard
+          },
+          setNotice: vi.fn()
+        })
+      )
+      return { claimed: hook.result.current.openOmpRpcCommandCard(text), openInteractiveCard }
+    }
+
+    it('claims a bare registered command and opens its card under the canonical name', () => {
+      const bare = claim('/switch')
+      expect(bare.claimed).toBe(true)
+      expect(bare.openInteractiveCard).toHaveBeenCalledWith('switch')
+
+      const alias = claim('/model')
+      expect(alias.claimed).toBe(true)
+      expect(alias.openInteractiveCard).toHaveBeenCalledWith('switch')
+    })
+
+    it('leaves an argumented invocation on the existing wire route', () => {
+      const argumented = claim('/switch gpt-6-astra')
+      expect(argumented.claimed).toBe(false)
+      expect(argumented.openInteractiveCard).not.toHaveBeenCalled()
+    })
+
+    it('claims nothing on a pane the RPC child does not own, or a non-OMP agent', () => {
+      expect(claim('/switch', { isOwned: false }).claimed).toBe(false)
+      expect(claim('/switch', { agent: 'claude' }).claimed).toBe(false)
+    })
+
+    it('leaves an unregistered command alone', () => {
+      const unregistered = claim('/usage')
+      expect(unregistered.claimed).toBe(false)
+      expect(unregistered.openInteractiveCard).not.toHaveBeenCalled()
+    })
+  })
 })

@@ -6,14 +6,13 @@
 // Every handler is fail-closed — degrades the caller to PTY behavior (D1)
 // instead of throwing across the IPC boundary.
 
-import { ipcMain, type IpcMainEvent, type WebContents } from 'electron'
+import { ipcMain } from 'electron'
 import type {
   OmpRpcChatAbortArgs,
   OmpRpcChatAcquireArgs,
   OmpRpcChatAcquireResult,
   OmpRpcChatClaimedHandback,
   OmpRpcChatClaimPendingHandbacksIpcArgs,
-  OmpRpcChatEventPayload,
   OmpRpcChatFetchHistoryArgs,
   OmpRpcChatFetchHistoryResult,
   OmpRpcChatHasSessionArgs,
@@ -25,10 +24,15 @@ import type {
   OmpRpcChatRespondExtensionUiArgs,
   OmpRpcChatSendArgs,
   OmpRpcChatSendResult,
-  OmpRpcChatSettleHandbackArgs,
-  OmpRpcChatSubscribeArgs,
-  OmpRpcChatUnsubscribeArgs
+  OmpRpcChatSettleHandbackArgs
 } from '../../shared/omp-rpc-chat-ipc-contract'
+import { OMP_RPC_CHAT_NO_OWNED_SESSION_REASON } from '../../shared/omp-rpc-chat-ipc-contract'
+import { registerOmpRpcChatInteractiveCommandHandlers } from './omp-rpc-chat-interactive-commands'
+import { registerOmpRpcChatResumableSessionHandlers } from './omp-rpc-chat-resumable-sessions'
+import {
+  clearOmpRpcChatFrameSubscriptionsForTests,
+  registerOmpRpcChatFrameSubscriptionHandlers
+} from './omp-rpc-chat-frame-subscriptions'
 import { OmpRpcChatSessionRegistry } from '../omp-rpc/omp-rpc-chat-session-registry'
 import {
   hasOtherLocalOmpRpcPtySessionWriter,
@@ -57,69 +61,10 @@ function getRegistry(): OmpRpcChatSessionRegistry {
   return registry
 }
 
-// Why: live subscriptions are keyed by (webContents.id, subscriptionId), same
-// shape as native-chat.ts's transcript subscriptions, so one renderer can
-// watch several panes and a destroyed window tears down all of its watchers.
-const subscriptionsBySender = new Map<number, Map<string, () => void>>()
-const senderCleanupRegistered = new Set<number>()
-
-function teardownSubscription(senderId: number, subscriptionId: string): void {
-  const bySubId = subscriptionsBySender.get(senderId)
-  const unsubscribe = bySubId?.get(subscriptionId)
-  if (!unsubscribe) {
-    return
-  }
-  unsubscribe()
-  bySubId?.delete(subscriptionId)
-  if (bySubId && bySubId.size === 0) {
-    subscriptionsBySender.delete(senderId)
-  }
-}
-
-function teardownAllForSender(senderId: number): void {
-  const bySubId = subscriptionsBySender.get(senderId)
-  if (!bySubId) {
-    return
-  }
-  for (const unsubscribe of bySubId.values()) {
-    unsubscribe()
-  }
-  subscriptionsBySender.delete(senderId)
-}
-
-function registerSenderCleanup(sender: WebContents): void {
-  if (senderCleanupRegistered.has(sender.id)) {
-    return
-  }
-  senderCleanupRegistered.add(sender.id)
-  sender.once('destroyed', () => {
-    teardownAllForSender(sender.id)
-    senderCleanupRegistered.delete(sender.id)
-  })
-}
-
-function handleSubscribe(event: IpcMainEvent, args: OmpRpcChatSubscribeArgs): void {
-  const sender = event.sender
-  if (sender.isDestroyed()) {
-    return
-  }
-  teardownSubscription(sender.id, args.subscriptionId)
-  const session = getRegistry().get(args.paneKey)
-  if (!session) {
-    return
-  }
-  registerSenderCleanup(sender)
-  const unsubscribe = session.on((rpcEvent) => {
-    if (sender.isDestroyed()) {
-      return
-    }
-    const payload: OmpRpcChatEventPayload = { subscriptionId: args.subscriptionId, event: rpcEvent }
-    sender.send('ompRpcChat:event', payload)
-  })
-  const bySubId = subscriptionsBySender.get(sender.id) ?? new Map<string, () => void>()
-  bySubId.set(args.subscriptionId, unsubscribe)
-  subscriptionsBySender.set(sender.id, bySubId)
-}
+/** Local alias for the contract's refusal wording, so the two call sites below
+ *  stay short. The contract owns the string; the resume enumerator and the
+ *  interactive-command table read the same export rather than a copy. */
+const NO_OWNED_SESSION_REASON = OMP_RPC_CHAT_NO_OWNED_SESSION_REASON
 
 export function registerOmpRpcChatHandlers(): void {
   ipcMain.handle(
@@ -335,7 +280,7 @@ export function registerOmpRpcChatHandlers(): void {
     async (_event, args: OmpRpcChatSendArgs): Promise<OmpRpcChatSendResult> => {
       const session = getRegistry().get(args?.paneKey ?? '')
       if (!session) {
-        return { ok: false, reason: 'no RPC-owned session for this pane' }
+        return { ok: false, reason: NO_OWNED_SESSION_REASON }
       }
       return session.send({
         message: args.message,
@@ -351,7 +296,7 @@ export function registerOmpRpcChatHandlers(): void {
     async (_event, args: OmpRpcChatAbortArgs): Promise<OmpRpcChatSendResult> => {
       const session = getRegistry().get(args?.paneKey ?? '')
       if (!session) {
-        return { ok: false, reason: 'no RPC-owned session for this pane' }
+        return { ok: false, reason: NO_OWNED_SESSION_REASON }
       }
       return session.abort()
     }
@@ -368,12 +313,25 @@ export function registerOmpRpcChatHandlers(): void {
     }
   )
 
-  ipcMain.on('ompRpcChat:subscribe', (event, args: OmpRpcChatSubscribeArgs) => {
-    handleSubscribe(event, args)
-  })
-  ipcMain.on('ompRpcChat:unsubscribe', (event, args: OmpRpcChatUnsubscribeArgs) => {
-    teardownSubscription(event.sender.id, args.subscriptionId)
-  })
+  // The interactive-command family (model / thinking / queue modes,
+  // compaction, session moves, auth, todos) lives in its own module: it is one
+  // registration table over a single read-only registry lookup, so it needs
+  // nothing from the ownership lifecycle here beyond that lookup, and cannot
+  // acquire, transfer or widen ownership. Registered at this exact point
+  // because the channel manifest a renderer relies on is this order.
+  registerOmpRpcChatInteractiveCommandHandlers(getRegistry)
+  // `/resume`'s enumeration half. It lives in its own module because it is the
+  // one pane-scoped channel that must answer WITHOUT the RPC child: the list is
+  // read from OMP's on-disk session layout, so a streaming or wedged child
+  // cannot make `/resume` unavailable — which is exactly when it is reached
+  // for. It gets two read-only registry lookups and nothing else, so it cannot
+  // acquire, transfer or widen ownership.
+  registerOmpRpcChatResumableSessionHandlers(getRegistry)
+  // The frame stream is a push channel (ipcMain.on + webContents.send), and
+  // the only part of this surface whose state belongs to a renderer rather
+  // than a pane, so its per-sender bookkeeping lives with it. Registered last,
+  // because the channel manifest a renderer relies on is this order.
+  registerOmpRpcChatFrameSubscriptionHandlers(getRegistry)
 }
 
 /** App-quit teardown, joined into the application's will-quit barrier by
@@ -391,10 +349,7 @@ export function shutdownOmpRpcChatSessions(): Promise<void> {
 
 /** Test-only: drop all live subscriptions and the registry between runs. */
 export function clearOmpRpcChatHandlersForTests(): void {
-  for (const senderId of subscriptionsBySender.keys()) {
-    teardownAllForSender(senderId)
-  }
-  senderCleanupRegistered.clear()
+  clearOmpRpcChatFrameSubscriptionsForTests()
   clearOmpRpcPaneHandbacksForTests()
   void registry?.disposeAll()
   registry = null

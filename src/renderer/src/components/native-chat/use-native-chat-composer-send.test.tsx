@@ -46,6 +46,7 @@ function buildArgs(overrides: Partial<UseNativeChatComposerSendArgs> = {}): {
   sendOmpLocalCommand: ReturnType<typeof vi.fn>
   sendOmpRpcChat: ReturnType<typeof vi.fn>
   sendOmpRpcCommand: ReturnType<typeof vi.fn>
+  openOmpRpcCommandCard: ReturnType<typeof vi.fn>
   resolveTarget: ReturnType<typeof vi.fn>
 } {
   const setNotice = vi.fn()
@@ -58,6 +59,7 @@ function buildArgs(overrides: Partial<UseNativeChatComposerSendArgs> = {}): {
   const sendOmpLocalCommand = vi.fn(() => false)
   const sendOmpRpcChat = vi.fn(() => false)
   const sendOmpRpcCommand = vi.fn(() => false)
+  const openOmpRpcCommandCard = vi.fn(() => false)
   const resolveTarget = vi.fn((): NativeChatResolvedTarget | null => null)
   const classification: NativeChatSendClassification = 'chat'
   const classifySend = vi.fn(() => classification)
@@ -76,6 +78,7 @@ function buildArgs(overrides: Partial<UseNativeChatComposerSendArgs> = {}): {
     sendOmpLocalCommand,
     sendOmpRpcChat,
     sendOmpRpcCommand,
+    openOmpRpcCommandCard,
     sessionOptionsSurface: null,
     trackPendingSend,
     setHistory,
@@ -94,6 +97,7 @@ function buildArgs(overrides: Partial<UseNativeChatComposerSendArgs> = {}): {
     sendOmpLocalCommand: args.sendOmpLocalCommand as ReturnType<typeof vi.fn>,
     sendOmpRpcChat: args.sendOmpRpcChat as ReturnType<typeof vi.fn>,
     sendOmpRpcCommand: args.sendOmpRpcCommand as ReturnType<typeof vi.fn>,
+    openOmpRpcCommandCard: args.openOmpRpcCommandCard as ReturnType<typeof vi.fn>,
     resolveTarget: args.resolveTarget as ReturnType<typeof vi.fn>
   }
 }
@@ -137,6 +141,41 @@ describe('useNativeChatComposerSend', () => {
     expect(resolveTarget).not.toHaveBeenCalled()
     expect(sendNativeChatMessage).not.toHaveBeenCalled()
     expect(setDraft).toHaveBeenCalledWith('')
+  })
+
+  it('opens an interactive command card instead of sending the command over the wire', () => {
+    // The ordering IS the fix: sending `/switch` as text gets a degraded
+    // one-liner back, so the card claim has to be asked first.
+    const { args, openOmpRpcCommandCard, sendOmpRpcCommand, sendOmpLocalCommand, setDraft } =
+      buildArgs({
+        draft: '/switch',
+        classifySend: vi.fn((): NativeChatSendClassification => 'command'),
+        openOmpRpcCommandCard: vi.fn(() => true),
+        sendOmpRpcCommand: vi.fn(() => true)
+      })
+    const { result } = renderHook(() => useNativeChatComposerSend(args))
+
+    act(() => result.current())
+
+    expect(openOmpRpcCommandCard).toHaveBeenCalledWith('/switch')
+    expect(sendOmpRpcCommand).not.toHaveBeenCalled()
+    expect(sendOmpLocalCommand).not.toHaveBeenCalled()
+    expect(sendNativeChatMessage).not.toHaveBeenCalled()
+    expect(setDraft).toHaveBeenCalledWith('')
+  })
+
+  it('sends the command over the wire when no card claims it', () => {
+    const { args, sendOmpRpcCommand } = buildArgs({
+      draft: '/switch gpt-6-astra',
+      classifySend: vi.fn((): NativeChatSendClassification => 'command'),
+      openOmpRpcCommandCard: vi.fn(() => false),
+      sendOmpRpcCommand: vi.fn(() => true)
+    })
+    const { result } = renderHook(() => useNativeChatComposerSend(args))
+
+    act(() => result.current())
+
+    expect(sendOmpRpcCommand).toHaveBeenCalledWith('/switch gpt-6-astra')
   })
 
   it('keeps a command on the PTY when the RPC session declines it', () => {

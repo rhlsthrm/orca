@@ -1,14 +1,12 @@
 import type {
   OmpRpcCommand,
   OmpRpcClientEvent,
-  OmpRpcChunkFrame,
   OmpRpcExtensionUiResponse,
   OmpRpcReadyFrame,
   OmpRpcSlashCommand,
   OmpRpcSpawnOptions,
   OmpSessionOwningRpcClient
 } from '../../shared/omp-rpc-protocol'
-import { OmpRpcChunkReassembler } from './omp-rpc-chunk-reassembler'
 import { OmpRpcClientEventFanout } from './omp-rpc-client-event-fanout'
 import {
   armOmpRpcResponseDeadline,
@@ -16,23 +14,12 @@ import {
   resolveOmpRpcRequestId,
   type OmpRpcPendingResponse
 } from './omp-rpc-command-correlation'
-import {
-  handleOmpRpcResponseFrame,
-  settleOmpRpcTurnTerminal
-} from './omp-rpc-turn-response-settlement'
-import {
-  isOmpRpcObject,
-  parseOmpRpcCommandsData,
-  parseOmpRpcReadyFrame
-} from './omp-rpc-frame-validation'
+import { parseOmpRpcCommandsData } from './omp-rpc-frame-validation'
+import { OmpRpcInboundFrameRouter } from './omp-rpc-inbound-frame-router'
 import { OmpRpcProcessTransport } from './omp-rpc-process-transport'
 import { OmpRpcProcessExit } from './omp-rpc-process-exit'
 import { OmpRpcSessionCommands } from './omp-rpc-session-commands'
 import { OmpRpcTurnCommands } from './omp-rpc-turn-commands'
-import { resolveOmpRpcServerFrameEvent } from './omp-rpc-frame-dispatch'
-import { OMP_RPC_PROTOCOL_VERSION } from './omp-rpc-transport-limits'
-
-const MALFORMED_LINE_EXCERPT_CHARS = 200
 
 type ReadyResult = {
   ready: OmpRpcReadyFrame
@@ -48,12 +35,9 @@ export class OmpRpcClient implements OmpSessionOwningRpcClient {
   private resolveReady!: (result: ReadyResult) => void
   private rejectReady!: (error: Error) => void
   private readonly processExit: OmpRpcProcessExit
-  private readyFrame: OmpRpcReadyFrame | null = null
+  private readonly frameRouter: OmpRpcInboundFrameRouter
   private readonly pendingResponses = new Map<string, OmpRpcPendingResponse>()
   private readonly issuedRequestIds = new Set<string>()
-  /** Sized from the ready frame's advertised envelope; null until it arrives.
-   *  A chunk before then is already a fault (chunks need protocol v2). */
-  private chunkReassembler: OmpRpcChunkReassembler | null = null
   private requestNumber = 0
   private isProtocolV2 = false
   private hasProtocolFault = false
@@ -69,6 +53,35 @@ export class OmpRpcClient implements OmpSessionOwningRpcClient {
   readonly steer: OmpSessionOwningRpcClient['steer']
   readonly followUp: OmpSessionOwningRpcClient['followUp']
   readonly respondExtensionUi: OmpSessionOwningRpcClient['respondExtensionUi']
+  // Interactive-command verbs. Same shape as the five above: the wire shape,
+  // the readiness gate and the response validation all live in
+  // OmpRpcSessionCommands, and the contract type is the single source for
+  // every signature — a verb whose helper drifts from it stops compiling here.
+  readonly getAvailableModels: OmpSessionOwningRpcClient['getAvailableModels']
+  readonly setModel: OmpSessionOwningRpcClient['setModel']
+  readonly cycleModel: OmpSessionOwningRpcClient['cycleModel']
+  readonly setThinkingLevel: OmpSessionOwningRpcClient['setThinkingLevel']
+  readonly cycleThinkingLevel: OmpSessionOwningRpcClient['cycleThinkingLevel']
+  readonly setSteeringMode: OmpSessionOwningRpcClient['setSteeringMode']
+  readonly setFollowUpMode: OmpSessionOwningRpcClient['setFollowUpMode']
+  readonly setInterruptMode: OmpSessionOwningRpcClient['setInterruptMode']
+  readonly setFastMode: OmpSessionOwningRpcClient['setFastMode']
+  readonly compact: OmpSessionOwningRpcClient['compact']
+  readonly setAutoCompaction: OmpSessionOwningRpcClient['setAutoCompaction']
+  readonly setAutoRetry: OmpSessionOwningRpcClient['setAutoRetry']
+  readonly abortRetry: OmpSessionOwningRpcClient['abortRetry']
+  readonly branch: OmpSessionOwningRpcClient['branch']
+  readonly getBranchMessages: OmpSessionOwningRpcClient['getBranchMessages']
+  readonly setSessionName: OmpSessionOwningRpcClient['setSessionName']
+  readonly handoff: OmpSessionOwningRpcClient['handoff']
+  readonly newSession: OmpSessionOwningRpcClient['newSession']
+  readonly getSessionStats: OmpSessionOwningRpcClient['getSessionStats']
+  readonly exportHtml: OmpSessionOwningRpcClient['exportHtml']
+  readonly getLoginProviders: OmpSessionOwningRpcClient['getLoginProviders']
+  readonly login: OmpSessionOwningRpcClient['login']
+  readonly getMessages: OmpSessionOwningRpcClient['getMessages']
+  readonly getSubagents: OmpSessionOwningRpcClient['getSubagents']
+  readonly setTodos: OmpSessionOwningRpcClient['setTodos']
 
   constructor(options: OmpRpcSpawnOptions) {
     this.readyPromise = new Promise<ReadyResult>((resolve, reject) => {
@@ -96,6 +109,31 @@ export class OmpRpcClient implements OmpSessionOwningRpcClient {
     this.setSubagentSubscription = sessionCommands.setSubagentSubscription
     this.switchSession = sessionCommands.switchSession
     this.abort = sessionCommands.abort
+    this.getAvailableModels = sessionCommands.getAvailableModels
+    this.setModel = sessionCommands.setModel
+    this.cycleModel = sessionCommands.cycleModel
+    this.setThinkingLevel = sessionCommands.setThinkingLevel
+    this.cycleThinkingLevel = sessionCommands.cycleThinkingLevel
+    this.setSteeringMode = sessionCommands.setSteeringMode
+    this.setFollowUpMode = sessionCommands.setFollowUpMode
+    this.setInterruptMode = sessionCommands.setInterruptMode
+    this.setFastMode = sessionCommands.setFastMode
+    this.compact = sessionCommands.compact
+    this.setAutoCompaction = sessionCommands.setAutoCompaction
+    this.setAutoRetry = sessionCommands.setAutoRetry
+    this.abortRetry = sessionCommands.abortRetry
+    this.branch = sessionCommands.branch
+    this.getBranchMessages = sessionCommands.getBranchMessages
+    this.setSessionName = sessionCommands.setSessionName
+    this.handoff = sessionCommands.handoff
+    this.newSession = sessionCommands.newSession
+    this.getSessionStats = sessionCommands.getSessionStats
+    this.exportHtml = sessionCommands.exportHtml
+    this.getLoginProviders = sessionCommands.getLoginProviders
+    this.login = sessionCommands.login
+    this.getMessages = sessionCommands.getMessages
+    this.getSubagents = sessionCommands.getSubagents
+    this.setTodos = sessionCommands.setTodos
     const turnCommands = new OmpRpcTurnCommands({
       whenReady: () => this.whenReady(),
       sendCommand: (command, requestId) => this.sendCommand(command, requestId),
@@ -105,8 +143,21 @@ export class OmpRpcClient implements OmpSessionOwningRpcClient {
     this.steer = turnCommands.steer
     this.followUp = turnCommands.followUp
     this.respondExtensionUi = turnCommands.respondExtensionUi
+    this.frameRouter = new OmpRpcInboundFrameRouter({
+      emit: (event) => this.emit(event),
+      protocolFault: (message) => this.protocolFault(message),
+      sendCommand: (command) => this.sendCommand(command),
+      pendingResponses: this.pendingResponses,
+      setMaxLineBytes: (maxFrameBytes) => this.transport.setMaxLineBytes(maxFrameBytes),
+      hasProtocolFault: () => this.hasProtocolFault,
+      isProtocolV2: () => this.isProtocolV2,
+      markProtocolV2: () => {
+        this.isProtocolV2 = true
+      },
+      resolveReady: (result) => this.resolveReady(result)
+    })
     this.transport = new OmpRpcProcessTransport(options, {
-      onLine: this.handleLine,
+      onLine: this.frameRouter.handleLine,
       onLineOverflow: (message) => this.protocolFault(message),
       onInvalidUtf8: (message) => this.protocolFault(message),
       onStreamError: this.handleStreamError,
@@ -147,105 +198,6 @@ export class OmpRpcClient implements OmpSessionOwningRpcClient {
     this.transport.dispose()
   }
 
-  private readonly handleLine = (line: string): void => {
-    if (this.hasProtocolFault) {
-      return
-    }
-    let frame: unknown
-    try {
-      frame = JSON.parse(line)
-    } catch {
-      const excerpt = line.slice(0, MALFORMED_LINE_EXCERPT_CHARS)
-      this.protocolFault(`OMP RPC emitted malformed JSON: ${excerpt}`)
-      return
-    }
-    if (!this.readyFrame) {
-      this.handleReadyFrame(frame)
-      return
-    }
-    this.handleFrame(frame)
-  }
-
-  private handleFrame(frame: unknown): void {
-    if (!isOmpRpcObject(frame) || typeof frame.type !== 'string') {
-      this.protocolFault('OMP RPC frame was not a JSON object with a type')
-      return
-    }
-    if (this.chunkReassembler?.hasPending && frame.type !== 'rpc_chunk') {
-      this.protocolFault('OMP RPC received a non-chunk frame during a pending chunk sequence')
-      return
-    }
-    if (frame.type === 'rpc_chunk') {
-      this.handleChunk(frame as OmpRpcChunkFrame)
-      return
-    }
-    if (frame.type === 'response') {
-      this.handleResponse(frame)
-      return
-    }
-    const resolution = resolveOmpRpcServerFrameEvent(
-      frame as Record<string, unknown> & { type: string }
-    )
-    if (resolution) {
-      if ('fault' in resolution) {
-        this.protocolFault(resolution.fault)
-      } else {
-        if (resolution.event.kind === 'prompt-result') {
-          settleOmpRpcTurnTerminal(this.pendingResponses, {
-            id: resolution.event.id,
-            agentInvoked: resolution.event.agentInvoked
-          })
-        }
-        if (resolution.event.kind === 'agent-end' && resolution.event.frame.isTerminal !== false) {
-          settleOmpRpcTurnTerminal(this.pendingResponses, {})
-        }
-        this.emit(resolution.event)
-      }
-      return
-    }
-    this.emit({ kind: 'unknown-frame', frame: frame as { type: string } & Record<string, unknown> })
-  }
-
-  private handleChunk(frame: OmpRpcChunkFrame): void {
-    if (!this.isProtocolV2 || !this.chunkReassembler) {
-      this.protocolFault('OMP RPC chunk arrived before protocol v2 negotiation')
-      return
-    }
-    const result = this.chunkReassembler.accept(frame)
-    if (result.kind === 'fault') {
-      this.protocolFault(result.message)
-      return
-    }
-    if (result.kind === 'complete') {
-      this.handleFrame(result.frame)
-    }
-  }
-
-  private handleReadyFrame(frame: unknown): void {
-    const ready = parseOmpRpcReadyFrame(frame)
-    if (!ready) {
-      this.protocolFault('OMP RPC first frame was not a valid ready frame')
-      return
-    }
-    this.readyFrame = ready
-    this.chunkReassembler = new OmpRpcChunkReassembler(ready)
-    this.transport.setMaxLineBytes(ready.maxFrameBytes)
-    // handleResponse already rejects a negotiate_protocol reply that did not
-    // select v2, so reaching the resolve path is itself the version proof.
-    void this.sendCommand({ type: 'negotiate_protocol', protocolVersion: 2 }).then(
-      () => {
-        const result = {
-          ready,
-          negotiatedProtocolVersion: OMP_RPC_PROTOCOL_VERSION
-        }
-        this.emit({ kind: 'ready', ...result })
-        this.resolveReady(result)
-      },
-      (error: Error) =>
-        this.protocolFault(`OMP RPC protocol v2 negotiation failed: ${error.message}`)
-    )
-  }
-
   private sendCommand(command: OmpRpcCommand, requestId?: string): Promise<unknown> {
     if (this.isDisposed || this.processExit.hasExited || this.hasProtocolFault) {
       return Promise.reject(new Error('OMP RPC client is not available'))
@@ -279,21 +231,6 @@ export class OmpRpcClient implements OmpSessionOwningRpcClient {
       return false
     }
     return this.transport.write(frame)
-  }
-
-  private handleResponse(frame: Record<string, unknown>): void {
-    handleOmpRpcResponseFrame(
-      this.pendingResponses,
-      frame,
-      () =>
-        this.emit({
-          kind: 'unknown-frame',
-          frame: frame as { type: string } & Record<string, unknown>
-        }),
-      () => {
-        this.isProtocolV2 = true
-      }
-    )
   }
 
   private readonly handleStreamError = (error: Error): void => {

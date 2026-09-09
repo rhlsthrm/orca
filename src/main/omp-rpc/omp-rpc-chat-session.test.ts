@@ -27,6 +27,7 @@ function makeOwnedSession(options: {
    *  leaves (XLR-018). */
   state?: OmpRpcSessionState
   getStateRejects?: boolean
+  branchRejects?: boolean
 }) {
   const listeners = new Set<(event: OmpRpcClientEvent) => void>()
   const getCommands = vi.fn(async () => {
@@ -66,12 +67,25 @@ function makeOwnedSession(options: {
       }
     )
   })
+  // Two interactive verbs stand in for the whole family: `branch` moves the
+  // child's session, `getAvailableModels` does not.
+  const branch = vi.fn(async (entryId: string) => {
+    if (options.branchRejects) {
+      throw new Error('Invalid entry ID for branching')
+    }
+    return { text: `turn ${entryId}`, cancelled: false }
+  })
+  const getAvailableModels = vi.fn(async () => [
+    { id: 'gpt-6-astra', name: 'GPT-6 Astra', provider: 'openai-codex' }
+  ])
   const client = {
     getCommands,
     fetchHistory,
     setSubagentSubscription,
     prompt,
     getState,
+    branch,
+    getAvailableModels,
     on: (listener: (event: OmpRpcClientEvent) => void) => {
       listeners.add(listener)
       return () => listeners.delete(listener)
@@ -85,6 +99,8 @@ function makeOwnedSession(options: {
     setSubagentSubscription,
     prompt,
     getState,
+    branch,
+    getAvailableModels,
     emit: (event: OmpRpcClientEvent) => {
       for (const listener of listeners) {
         listener(event)
@@ -361,6 +377,117 @@ describe('OmpRpcChatSession command session identity', () => {
     void session.send({ message: '/branch', behavior: 'command' })
 
     await expect(session.whenSessionIdentitySettled(1)).resolves.toBe(false)
+    session.dispose()
+  })
+
+  // The interactive-command route reaches the SAME session-moving verbs the
+  // slash-command route does, just without going through a prompt. `branch`,
+  // `new_session` and `handoff` change the session file the child writes and
+  // upstream announces none of it, so this route owes the read-back too — or
+  // main keeps claiming, and keeps excluding from every other pane, a session
+  // nobody is writing while a second pane can be handed the live one.
+  it('republishes the identity a session-moving verb switched the child to', async () => {
+    const harness = makeOwnedSession({
+      state: {
+        sessionFile: '/sessions/b.jsonl',
+        sessionId: 'session-b',
+        isStreaming: false,
+        isCompacting: false,
+        queuedMessageCount: 0
+      }
+    })
+    const identities: OmpRpcChatSessionIdentityReadback[] = []
+    const session = new OmpRpcChatSession(harness.owned, '/sessions/a.jsonl', (readback) =>
+      identities.push(readback)
+    )
+    const events: OmpRpcClientEvent[] = []
+    session.on((event) => events.push(event))
+
+    await expect(
+      session.runCommand({ movesSession: true, run: (client) => client.branch('entry-7') })
+    ).resolves.toEqual({ ok: true, data: { text: 'turn entry-7', cancelled: false } })
+
+    expect(identities).toEqual([
+      { kind: 'identity', sessionFilePath: '/sessions/b.jsonl', sessionId: 'session-b' }
+    ])
+    expect(events).toContainEqual({ kind: 'session-info', title: null, sessionId: 'session-b' })
+    session.dispose()
+  })
+
+  it('fails a session-moving verb closed when the identity cannot be read back', async () => {
+    const harness = makeOwnedSession({ getStateRejects: true })
+    const identities: OmpRpcChatSessionIdentityReadback[] = []
+    const session = new OmpRpcChatSession(harness.owned, '/sessions/a.jsonl', (readback) =>
+      identities.push(readback)
+    )
+
+    const result = await session.runCommand({
+      movesSession: true,
+      run: (client) => client.branch('entry-7')
+    })
+
+    expect(result.ok).toBe(false)
+    expect(identities).toEqual([{ kind: 'unreadable', reason: 'transport closed' }])
+    session.dispose()
+  })
+
+  it('never reads the identity back for a verb that cannot move the session', async () => {
+    const harness = makeOwnedSession({})
+    const session = new OmpRpcChatSession(harness.owned, '/sessions/a.jsonl')
+
+    await expect(
+      session.runCommand({ run: (client) => client.getAvailableModels() })
+    ).resolves.toEqual({
+      ok: true,
+      data: [{ id: 'gpt-6-astra', name: 'GPT-6 Astra', provider: 'openai-codex' }]
+    })
+
+    expect(harness.getState).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  it('reports a refused verb as a reason instead of throwing at the IPC boundary', async () => {
+    const harness = makeOwnedSession({ branchRejects: true })
+    const session = new OmpRpcChatSession(harness.owned, '/sessions/a.jsonl')
+
+    await expect(
+      session.runCommand({ movesSession: true, run: (client) => client.branch('entry-7') })
+    ).resolves.toEqual({ ok: false, reason: 'Invalid entry ID for branching' })
+    // The verb never ran to completion, so there was nothing to reconcile.
+    expect(harness.getState).not.toHaveBeenCalled()
+    session.dispose()
+  })
+
+  // XLR-R7-002: a session-moving verb runs no agent, so it emits no
+  // `agent-end` and — on a same-session read-back — no `session-info` either.
+  // Without this wake a release refused purely because command identity had
+  // not settled is never retried, and main keeps the child for the app's life.
+  it('wakes the command-settled listeners after a session-moving verb', async () => {
+    const harness = makeOwnedSession({})
+    const session = new OmpRpcChatSession(harness.owned, '/sessions/a.jsonl')
+    let settledCount = 0
+    session.onCommandSettled(() => {
+      settledCount += 1
+    })
+
+    await session.runCommand({ movesSession: true, run: (client) => client.branch('entry-7') })
+    await session.whenSessionIdentitySettled()
+
+    expect(settledCount).toBe(1)
+    session.dispose()
+  })
+
+  it('leaves the identity gate untouched for a verb that cannot move the session', async () => {
+    const harness = makeOwnedSession({})
+    const session = new OmpRpcChatSession(harness.owned, '/sessions/a.jsonl')
+    let settledCount = 0
+    session.onCommandSettled(() => {
+      settledCount += 1
+    })
+
+    await session.runCommand({ run: (client) => client.getAvailableModels() })
+
+    expect(settledCount).toBe(0)
     session.dispose()
   })
 
