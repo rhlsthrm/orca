@@ -122,6 +122,21 @@ describe('useOmpPaneSessionIdentity', () => {
     expect(result.current).toBeNull()
   })
 
+  // A pane whose session OMP has named but not materialized is a resolved
+  // identity, not "nothing to resume": withholding it is what left such a
+  // pane unable to ever engage RPC ownership.
+  it('treats a fresh, not-yet-materialized session as resolved', async () => {
+    resolveSessionIdentity.mockResolvedValue({
+      sessionId: 'session-fresh',
+      source: 'fresh-breadcrumb'
+    })
+    const { result } = renderHook(() => useOmpPaneSessionIdentity(BASE_ARGS))
+
+    await waitFor(() => expect(result.current).toBe('session-fresh'))
+    // Resolved means resolved: no perpetual re-probe chain behind it.
+    expect(resolveSessionIdentity).toHaveBeenCalledTimes(1)
+  })
+
   // Wave 9, Defect 1, acceptance criterion 1 (the deadlock this wave
   // fixes): Decision 1's acquisition kills the pane's live PTY on success,
   // nulling `ptyId`. That must never discard an already-resolved identity
@@ -157,6 +172,38 @@ describe('useOmpPaneSessionIdentity', () => {
     rerender({ ...BASE_ARGS, ptyId: 'pty-2' })
     await waitFor(() => expect(resolveSessionIdentity).toHaveBeenCalledTimes(2))
     await waitFor(() => expect(result.current).toBe('breadcrumb-session'))
+  })
+
+  // A fresh target is the weaker claim of the two: the pane's own TUI can
+  // have left it for a real session (a `/resume`) before ownership engaged,
+  // and a materialized breadcrumb hit is what it is actually on now.
+  it('upgrades a fresh target to the authoritative breadcrumb on a later resolution', async () => {
+    resolveSessionIdentity.mockResolvedValueOnce({
+      sessionId: 'session-fresh',
+      source: 'fresh-breadcrumb'
+    })
+    const { result, rerender } = renderHook(
+      (props: UseOmpPaneSessionIdentityArgs) => useOmpPaneSessionIdentity(props),
+      { initialProps: BASE_ARGS }
+    )
+    await waitFor(() => expect(result.current).toBe('session-fresh'))
+
+    resolveSessionIdentity.mockResolvedValueOnce({
+      sessionId: 'session-resumed',
+      source: 'breadcrumb'
+    })
+    rerender({ ...BASE_ARGS, ptyId: 'pty-2' })
+    await waitFor(() => expect(resolveSessionIdentity).toHaveBeenCalledTimes(2))
+    await waitFor(() => expect(result.current).toBe('session-resumed'))
+
+    // But a heuristic guess must still never displace it.
+    resolveSessionIdentity.mockResolvedValueOnce({
+      sessionId: 'session-older',
+      source: 'mtime-fallback'
+    })
+    rerender({ ...BASE_ARGS, ptyId: 'pty-3' })
+    await waitFor(() => expect(resolveSessionIdentity).toHaveBeenCalledTimes(3))
+    expect(result.current).toBe('session-resumed')
   })
 
   it('never downgrades or swaps an authoritative breadcrumb on a later re-resolution', async () => {

@@ -17248,6 +17248,9 @@
       },
       "terminalOnlyCommand": {
         "notice": "`/{{command}}` opens {{surface}}, which OMP only draws in the terminal view. Press {{shortcut}} to switch to it."
+      },
+      "cardCommandUnavailable": {
+        "notice": "`/{{command}}` needs this pane’s chat session, which is not connected yet. Press {{shortcut}} to run it in the terminal view."
       }
     },
     "tab": {

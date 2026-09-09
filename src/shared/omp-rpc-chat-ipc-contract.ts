@@ -33,7 +33,12 @@ export type OmpRpcChatResolveSessionIdentityArgs = {
   cwd: string
 }
 
-export type OmpRpcChatSessionIdentitySource = 'breadcrumb' | 'mtime-fallback'
+/** Mirrors `OmpTerminalSessionIdentitySource` (main-side resolver), which owns
+ *  what each value means. `fresh-breadcrumb` is a session the pane's OMP has
+ *  named but not materialized: a real identity with a known-EMPTY transcript,
+ *  which is why it travels distinguishably from a `breadcrumb` hit on an
+ *  existing session. */
+export type OmpRpcChatSessionIdentitySource = 'breadcrumb' | 'fresh-breadcrumb' | 'mtime-fallback'
 
 export type OmpRpcChatResolveSessionIdentityResult = {
   sessionId: string

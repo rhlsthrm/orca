@@ -49,7 +49,10 @@ import {
 import { releaseOmpRpcPaneWithHandback } from '../omp-rpc/omp-rpc-pane-release-handback'
 import { resolveOmpRpcLaunch } from './omp-rpc'
 import { resolveSessionFilePath } from '../native-chat/session-file-resolver'
-import { resolveOmpPaneSessionIdentity } from '../native-chat/omp-terminal-session-identity'
+import {
+  resolveOmpFreshSessionTargetPath,
+  resolveOmpPaneSessionIdentity
+} from '../native-chat/omp-terminal-session-identity'
 import { localOmpRpcSessionWriteFence } from '../omp-rpc/omp-rpc-local-session-write-fence'
 
 let registry: OmpRpcChatSessionRegistry | null = null
@@ -150,7 +153,22 @@ export function registerOmpRpcChatHandlers(): void {
           // milestone's callers pass — a bare id neither throws nor switches,
           // so acquisition must resolve the real transcript file first or it
           // silently never engages RPC for any pane.
-          const sessionFilePath = await resolveSessionFilePath('omp', sessionFile)
+          //
+          // The second lookup is the fresh-session case: a pane sitting on a
+          // brand-new session OMP has not materialized has no file for the
+          // id-based search to find, so it would be refused here even though
+          // its identity resolved (`fresh-breadcrumb`). That lookup re-derives
+          // the target from OMP's own breadcrumb and re-checks every guard
+          // (fresh marker, cwd agreement, still-absent, unclaimed), so a
+          // renderer cannot widen what acquisition will switch onto.
+          const sessionFilePath =
+            (await resolveSessionFilePath('omp', sessionFile)) ??
+            (await resolveOmpFreshSessionTargetPath(
+              { cwd, sessionId: sessionFile },
+              {
+                claimedSessionFilePaths: getRegistry().claimedSessionFilePathsExcluding(paneKey)
+              }
+            ))
           if (isShuttingDown) {
             return { ok: false, reason: 'spawn-failed' }
           }

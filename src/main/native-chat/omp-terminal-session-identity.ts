@@ -8,26 +8,43 @@
 //      `<terminal-id>` is derived the same way OMP derives it: from the pane's PTY
 //      slave device path (OMP "prefers TTY path"; real breadcrumb files observed on
 //      this machine are named e.g. `ttys000`, matching `basename(slavePath)`).
+//   1b. A breadcrumb whose recorded target does NOT exist yet, while the
+//      breadcrumb also carries the `fresh` marker: OMP has decided which
+//      session file this tty's next turn writes and simply has not
+//      materialized it (a `/new` boundary, or a pane whose first prompt was
+//      never sent). That is a real, usable identity for THIS pane — see
+//      `fresh-breadcrumb` below.
 //   2. With no live PTY: newest `.jsonl` by mtime in the pane's encoded-cwd
 //      session bucket — a recovery heuristic, never a live-takeover identity.
 //
-// CRITICAL: a wrong path does not fail loudly. `setSessionFile` treats a missing or
-// malformed session file as "empty" and silently initializes a brand-new session
-// there. Every path this module returns is verified to exist on disk before it is
-// handed back, and a breadcrumb whose recorded cwd disagrees with the pane's actual
-// cwd (stale — ttys device paths are reused across processes) is never trusted.
+// CRITICAL: a wrong path does not fail loudly. `setSessionFile` treats a missing
+// or malformed session file as "empty" and silently initializes a brand-new
+// session there. Every path this module returns for an EXISTING session is
+// verified to exist on disk before it is handed back; the single exception is
+// `fresh-breadcrumb`, whose absence is the point and whose safety comes from
+// provenance rather than a stat (see that source's doc). A breadcrumb whose
+// recorded cwd disagrees with the pane's actual cwd (stale — ttys device paths
+// are reused across processes) is never trusted, fresh or not.
 import { homedir, tmpdir } from 'node:os'
 import { dirname, isAbsolute, join, relative, sep } from 'node:path'
 import { realpathSync } from 'node:fs'
 import type { Dirent } from 'node:fs'
 import { readdir, readFile, stat } from 'node:fs/promises'
 
-export type OmpTerminalSessionIdentitySource = 'breadcrumb' | 'mtime-fallback'
+/** `fresh-breadcrumb` is the one source whose file does not exist yet. It is
+ *  NOT a guess: the path came from OMP's own breadcrumb for this pane's tty,
+ *  so an RPC child materializing it produces exactly the session the pane's
+ *  own TUI would have produced on its next turn. Kept distinguishable from
+ *  `breadcrumb` so a consumer can tell a known-empty target from a resolved
+ *  existing session, and from `mtime-fallback`, which stays a heuristic and
+ *  must never become a live-takeover identity. */
+export type OmpTerminalSessionIdentitySource = 'breadcrumb' | 'fresh-breadcrumb' | 'mtime-fallback'
 
 export type OmpPaneSessionIdentity = {
   /** Bare session id — the claim identity `ompRpcChat:acquire` expects as `sessionFile`. */
   sessionId: string
-  /** Absolute path to the session's JSONL transcript, verified to exist. */
+  /** Absolute path to the session's JSONL transcript. Verified to exist for
+   *  every source except `fresh-breadcrumb`. */
   sessionFilePath: string
   source: OmpTerminalSessionIdentitySource
 }
@@ -203,7 +220,11 @@ async function resolveFromBreadcrumb(
   slavePath: string | undefined,
   cwd: string,
   options?: ResolveOmpPaneSessionIdentityOptions
-): Promise<{ sessionFilePath: string } | 'fresh-empty' | null> {
+): Promise<
+  | { sessionFilePath: string; source: Exclude<OmpTerminalSessionIdentitySource, 'mtime-fallback'> }
+  | 'fresh-empty'
+  | null
+> {
   const terminalId = slavePath ? terminalIdFromSlavePath(slavePath) : null
   if (!terminalId) {
     return null
@@ -223,13 +244,27 @@ async function resolveFromBreadcrumb(
     if (normalizeCwdForComparison(breadcrumb.cwd) !== normalizeCwdForComparison(cwd)) {
       return null
     }
-    if (!(await fileExists(breadcrumb.sessionFilePath))) {
+    if (await fileExists(breadcrumb.sessionFilePath)) {
+      return { sessionFilePath: breadcrumb.sessionFilePath, source: 'breadcrumb' }
+    }
+    if (!breadcrumb.fresh) {
       // Materialized-but-missing is not "fresh" — the recorded target rotted
       // (moved/deleted). Fall through to the mtime fallback rather than
       // trust a path that would silently mint an empty session.
       return null
     }
-    return { sessionFilePath: breadcrumb.sessionFilePath }
+    // Absent AND marked fresh: OMP recorded this exact path as the session
+    // this tty's next turn writes, and simply has not created it yet — the
+    // live shape of a pane whose chat view opened before its first prompt.
+    // Handing it back is not a guess (see `fresh-breadcrumb`); withholding it
+    // is what left such a pane permanently unownable, so slash commands fell
+    // through to an invisible TUI. The claimed-path exclusion still applies:
+    // if another live pane already owns this target, this pane must not race
+    // it to materialize the same file.
+    if (options?.claimedSessionFilePaths?.has(breadcrumb.sessionFilePath)) {
+      return null
+    }
+    return { sessionFilePath: breadcrumb.sessionFilePath, source: 'fresh-breadcrumb' }
   }
   // Missing target: only a legitimate, non-stale state when `fresh` — a
   // lazily-unmaterialized `/new` boundary with genuinely nothing to resume.
@@ -300,6 +335,67 @@ export function parseOmpSessionIdFromFilename(filePath: string): string | null {
 }
 
 /**
+ * The fresh, not-yet-materialized session file a pane breadcrumb records for
+ * `sessionId` under `cwd`, or null.
+ *
+ * Why this exists separately from the resolver above: acquisition receives the
+ * BARE session id and resolves its `switch_session` path with
+ * `resolveSessionFilePath`, which can only ever find a file that already
+ * exists — so a pane whose identity resolved as `fresh-breadcrumb` would be
+ * refused at acquire time, i.e. exactly the pane this feature is for. And the
+ * tty-scoped lookup above is unavailable by then: Decision 1's acquisition
+ * kills the pane's PTY first, so there is no slave path left to derive a
+ * terminal id from. The breadcrumb FILE outlives its process (this machine
+ * holds entries for ttys whose devices are long gone), so the target is found
+ * by scanning breadcrumbs for the one naming this session.
+ *
+ * Re-verifies every condition from OMP's own record rather than trusting a
+ * remembered path: the breadcrumb must still name this session, still carry
+ * `fresh`, still agree with the pane's cwd, still be absent on disk, and still
+ * be unclaimed by another pane. Any of those failing yields null, and the
+ * caller keeps its existing refusal.
+ */
+export async function resolveOmpFreshSessionTargetPath(
+  args: { cwd: string; sessionId: string },
+  options?: ResolveOmpPaneSessionIdentityOptions
+): Promise<string | null> {
+  let entries: Dirent[]
+  try {
+    entries = await readdir(join(ompAgentDir(options), 'terminal-sessions'), {
+      withFileTypes: true
+    })
+  } catch {
+    return null
+  }
+  const paneCwd = normalizeCwdForComparison(args.cwd)
+  for (const entry of entries) {
+    if (!entry.isFile()) {
+      continue
+    }
+    const breadcrumb = await readTerminalBreadcrumb(entry.name, options)
+    const target = breadcrumb?.sessionFilePath
+    if (
+      !breadcrumb ||
+      !target ||
+      !breadcrumb.fresh ||
+      parseOmpSessionIdFromFilename(target) !== args.sessionId ||
+      normalizeCwdForComparison(breadcrumb.cwd) !== paneCwd ||
+      options?.claimedSessionFilePaths?.has(target) === true
+    ) {
+      continue
+    }
+    // A target that has since materialized is a resolved EXISTING session:
+    // `resolveSessionFilePath` finds it by id, and handing it back from here
+    // would skip that verified route in favour of an unstatted path.
+    if (await fileExists(target)) {
+      continue
+    }
+    return target
+  }
+  return null
+}
+
+/**
  * Resolves the session a pane's OMP process is (or was) using, without the
  * broken hook chain. Null means "nothing to resume" — not an error: callers
  * must degrade to today's PTY behavior, never guess a path.
@@ -322,7 +418,7 @@ export async function resolveOmpPaneSessionIdentity(
   let source: OmpTerminalSessionIdentitySource
   if (fromBreadcrumb) {
     sessionFilePath = fromBreadcrumb.sessionFilePath
-    source = 'breadcrumb'
+    source = fromBreadcrumb.source
   } else {
     const canUseMtimeFallback =
       args.ptyId === null || (slavePath === undefined && process.platform === 'win32')
@@ -338,8 +434,12 @@ export async function resolveOmpPaneSessionIdentity(
   }
   // Verify existence a final time immediately before handing the path back —
   // the single most dangerous failure mode in this wave is an unverified path
-  // reaching `switch_session` (see module doc).
-  if (!(await fileExists(sessionFilePath))) {
+  // reaching `switch_session` (see module doc). The lone exception is
+  // `fresh-breadcrumb`: its target is absent BY DEFINITION, and what makes it
+  // safe is provenance, not a stat — OMP's own breadcrumb for this pane's tty
+  // named it, with the `fresh` marker, for this pane's cwd, unclaimed by any
+  // other pane. Statting it here would reject exactly the case it exists for.
+  if (source !== 'fresh-breadcrumb' && !(await fileExists(sessionFilePath))) {
     return null
   }
   const sessionId = parseOmpSessionIdFromFilename(sessionFilePath)

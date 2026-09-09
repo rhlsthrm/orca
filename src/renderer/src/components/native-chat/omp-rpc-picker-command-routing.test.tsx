@@ -42,7 +42,7 @@ function renderDispatch(options: {
   resolveTarget?: () => { settings: Record<string, never>; ptyId: string } | null
   setNotice?: Dispatch<SetStateAction<string | null>>
   sendOmpRpcCommand?: (text: string) => boolean
-  openOmpRpcCommandCard?: (text: string) => boolean
+  claimOmpRpcInteractiveCommand?: (text: string) => boolean
   clearImageAttachments?: () => void
 }) {
   return renderHook(() =>
@@ -50,7 +50,7 @@ function renderDispatch(options: {
       agent: options.agent,
       ompRpcCwd: '/work/a',
       sendOmpRpcCommand: options.sendOmpRpcCommand,
-      openOmpRpcCommandCard: options.openOmpRpcCommandCard,
+      claimOmpRpcInteractiveCommand: options.claimOmpRpcInteractiveCommand,
       disabled: false,
       isDispatchingSessionOption: false,
       resolveTarget: options.resolveTarget ?? (() => ({ settings: {}, ptyId: 'pty-1' })),
@@ -221,26 +221,28 @@ describe('picker dispatch routes other catalog commands to the owning session', 
     expect(setNotice).not.toHaveBeenCalledWith(expect.any(String))
   })
 
-  it('opens the interactive card for a card-backed command instead of sending it', () => {
+  it('lets the interactive-command claim answer a card-backed command instead of sending it', () => {
     // Picking `/switch` from the menu has to behave exactly like typing it,
-    // or the same command means two different things in one pane.
-    const openOmpRpcCommandCard = vi.fn(() => true)
+    // or the same command means two different things in one pane. That claim
+    // now covers the not-owned pane too (it answers with a local notice), and
+    // the picker must keep routing nothing when it fires.
+    const claimOmpRpcInteractiveCommand = vi.fn(() => true)
     const sendOmpRpcCommand = vi.fn(() => true)
     const onSlashCommand = vi.fn()
     const hook = renderDispatch({
       agent: 'omp',
       onSlashCommand,
       resolveTarget: () => null,
-      openOmpRpcCommandCard,
+      claimOmpRpcInteractiveCommand,
       sendOmpRpcCommand
     })
 
     act(() => hook.result.current(commandItem('switch')))
 
-    expect(openOmpRpcCommandCard).toHaveBeenCalledWith('/switch')
+    expect(claimOmpRpcInteractiveCommand).toHaveBeenCalledWith('/switch')
     expect(sendOmpRpcCommand).not.toHaveBeenCalled()
     expect(sendNativeChatMessage).not.toHaveBeenCalled()
-    // The card's own answer records the marker; nothing has run yet.
+    // The claim's own answer records the marker; nothing has run yet.
     expect(onSlashCommand).not.toHaveBeenCalled()
   })
 

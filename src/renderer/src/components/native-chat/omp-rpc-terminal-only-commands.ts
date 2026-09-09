@@ -1,5 +1,9 @@
-// The commands OMP only implements as a terminal surface, and the honest
-// notice Orca answers them with.
+// The OMP commands Orca answers with a local notice instead of a route, and
+// the honest wording for each. Two cases live here:
+//
+//   1. A command OMP only implements as a terminal surface (the table below).
+//   2. A command Orca HAS a card for, on a pane that cannot drive one because
+//      it holds no RPC session (`ompRpcCardCommandUnavailableNotice`).
 //
 // OMP's unified registry gives each builtin a text-mode `handle`, a TUI-only
 // `handleTui`, or both. Its RPC layer advertises (and dispatches) ONLY the
@@ -115,5 +119,25 @@ export function ompRpcTerminalOnlyCommandNotice(
       surface: entry.surface,
       shortcut: nativeChatToggleShortcutLabel(isMac)
     }
+  )
+}
+
+/** The notice for a card-backed command typed on a pane with no RPC session
+ *  to drive the card with.
+ *
+ *  Why declining beats forwarding (proven live, 2026-09-09, omp 18.1.15): a
+ *  bare `/switch` that fell through to the PTY opened OMP's model-selector
+ *  overlay behind the chat view, where it then SWALLOWED every later
+ *  keystroke — a following "hi" never became a prompt and never materialized
+ *  the session, while chat showed only `Ran /switch` and silence. An
+ *  invisible modal capturing input the user believes is going to chat is a
+ *  trap, not a degrade, so the command is answered here instead: same
+ *  `agentInvoked: false` local-output mechanism as the table above, no wire
+ *  send, and never a fabricated `extension_ui_request`. */
+export function ompRpcCardCommandUnavailableNotice(command: string, isMac: boolean): string {
+  return translate(
+    'components.native-chat.cardCommandUnavailable.notice',
+    '`/{{command}}` needs this pane’s chat session, which is not connected yet. Press {{shortcut}} to run it in the terminal view.',
+    { command, shortcut: nativeChatToggleShortcutLabel(isMac) }
   )
 }

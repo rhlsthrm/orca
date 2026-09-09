@@ -11,6 +11,8 @@ import { useOmpRpcChatSend } from './use-omp-rpc-chat-send'
 import { useOmpRpcCommandSend } from './use-omp-rpc-command-send'
 import { isOmpRpcCatalogAgent } from './omp-rpc-command-catalog'
 import { findOmpRpcInteractiveCommandCard } from './omp-rpc-interactive-command-registry'
+import { isMacPlatform } from './native-chat-shortcut'
+import { ompRpcCardCommandUnavailableNotice } from './omp-rpc-terminal-only-commands'
 
 export const OMP_RPC_CHAT_DISABLED: NativeChatComposerOmpRpcBinding = {
   isOwned: false,
@@ -36,9 +38,11 @@ export type NativeChatComposerOmpRpcSend = {
   sendOmpRpcChat: (text: string) => boolean
   /** Routes a catalog slash command through the owning session (open item 4). */
   sendOmpRpcCommand: (text: string) => boolean
-  /** Claims a bare interactive command by opening its Orca-rendered card.
-   *  `false` means the draft keeps whichever route it has today. */
-  openOmpRpcCommandCard: (text: string) => boolean
+  /** Claims a bare interactive command: opens its Orca-rendered card when the
+   *  pane can drive one, and answers it with a local notice when the pane
+   *  holds no RPC session. `false` means the draft keeps whichever route it
+   *  has today. */
+  claimOmpRpcInteractiveCommand: (text: string) => boolean
   /** Present only while an RPC-owned pane's turn is streaming. The toggle
    *  applies to one send, then clears before another message can inherit it. */
   followUp: NativeChatComposerFollowUp | null
@@ -111,18 +115,36 @@ export function useNativeChatComposerOmpRpcSend(
   // registered command therefore opens Orca's card instead. An argumented
   // invocation never matches a card, so `/switch gpt-6-astra` still goes
   // straight to the session route below.
-  const openOmpRpcCommandCard = (text: string): boolean => {
-    const openCard = ompRpcChat.openInteractiveCard
-    if (!ompRpcChat.isOwned || !openCard || !isOmpRpcCatalogAgent(agent)) {
+  //
+  // And when the pane cannot drive the card (no RPC session yet), the claim
+  // still holds the draft: the PTY route would type the command into a
+  // terminal that is hidden behind the chat view, where OMP's overlay then
+  // captures every later keystroke (see `ompRpcCardCommandUnavailableNotice`
+  // for the live evidence). Only a caller that cannot render the notice —
+  // no `onSlashCommand` — declines, keeping today's route rather than
+  // swallowing the draft silently.
+  const claimOmpRpcInteractiveCommand = (text: string): boolean => {
+    if (!isOmpRpcCatalogAgent(agent)) {
       return false
     }
     const card = findOmpRpcInteractiveCommandCard(text)
     if (!card) {
       return false
     }
-    openCard(card.command)
+    const openCard = ompRpcChat.openInteractiveCard
+    if (ompRpcChat.isOwned && openCard) {
+      openCard(card.command)
+      return true
+    }
+    if (!onSlashCommand) {
+      return false
+    }
+    onSlashCommand(text.trim(), {
+      outputText: ompRpcCardCommandUnavailableNotice(card.command, isMacPlatform()),
+      agentInvoked: false
+    })
     return true
   }
 
-  return { sendOmpRpcChat, sendOmpRpcCommand, openOmpRpcCommandCard, followUp }
+  return { sendOmpRpcChat, sendOmpRpcCommand, claimOmpRpcInteractiveCommand, followUp }
 }

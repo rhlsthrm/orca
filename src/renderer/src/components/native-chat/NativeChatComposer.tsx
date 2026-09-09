@@ -250,7 +250,7 @@ const NativeChatComposerPane = forwardRef<NativeChatComposerHandle, NativeChatCo
       onSlashCommand,
       setNotice
     })
-    const { sendOmpRpcChat, sendOmpRpcCommand, openOmpRpcCommandCard, followUp } =
+    const { sendOmpRpcChat, sendOmpRpcCommand, claimOmpRpcInteractiveCommand, followUp } =
       useNativeChatComposerOmpRpcSend({
         agent,
         ompRpcChat,
@@ -277,7 +277,7 @@ const NativeChatComposerPane = forwardRef<NativeChatComposerHandle, NativeChatCo
       sendOmpLocalCommand,
       sendOmpRpcChat,
       sendOmpRpcCommand,
-      openOmpRpcCommandCard,
+      claimOmpRpcInteractiveCommand,
       onSlashCommand,
       onOptimisticSend,
       sessionOptionsSurface: ptySessionOptionsSurface,
@@ -307,7 +307,7 @@ const NativeChatComposerPane = forwardRef<NativeChatComposerHandle, NativeChatCo
       agent,
       ompRpcCwd,
       sendOmpRpcCommand,
-      openOmpRpcCommandCard,
+      claimOmpRpcInteractiveCommand,
       disabled,
       isDispatchingSessionOption,
       resolveTarget,

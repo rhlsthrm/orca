@@ -13,6 +13,7 @@ const {
   resolveOmpRpcLaunch,
   resolveSessionFilePath,
   resolveOmpPaneSessionIdentity,
+  resolveOmpFreshSessionTargetPath,
   hasOtherLocalOmpRpcPtySessionWriter,
   localOmpRpcPtyProvider,
   isLocalOmpRpcPtyAlive,
@@ -38,6 +39,7 @@ const {
     resolveOmpRpcLaunch: vi.fn(),
     resolveSessionFilePath: vi.fn(),
     resolveOmpPaneSessionIdentity: vi.fn(),
+    resolveOmpFreshSessionTargetPath: vi.fn(),
     hasOtherLocalOmpRpcPtySessionWriter: vi.fn(),
     localOmpRpcPtyProvider: vi.fn(),
     isLocalOmpRpcPtyAlive: vi.fn(),
@@ -58,7 +60,10 @@ vi.mock('../omp-rpc/omp-rpc-chat-session-registry', () => ({
 }))
 vi.mock('./omp-rpc', () => ({ resolveOmpRpcLaunch }))
 vi.mock('../native-chat/session-file-resolver', () => ({ resolveSessionFilePath }))
-vi.mock('../native-chat/omp-terminal-session-identity', () => ({ resolveOmpPaneSessionIdentity }))
+vi.mock('../native-chat/omp-terminal-session-identity', () => ({
+  resolveOmpPaneSessionIdentity,
+  resolveOmpFreshSessionTargetPath
+}))
 // Why: no real PTY provider is ever registered for a bare 'pty-N' test id —
 // the resolveSessionIdentity locality gate (finding E) would otherwise
 // reject every test call as "not local" regardless of intent. Defaults
@@ -118,6 +123,7 @@ describe('OMP RPC chat IPC handlers', () => {
     resolveOmpRpcLaunch.mockResolvedValue({ executablePath: '/usr/local/bin/omp' })
     resolveSessionFilePath.mockResolvedValue('/sessions/a.jsonl')
     resolveOmpPaneSessionIdentity.mockResolvedValue(null)
+    resolveOmpFreshSessionTargetPath.mockResolvedValue(null)
     hasOtherLocalOmpRpcPtySessionWriter.mockResolvedValue(false)
     localOmpRpcPtyProvider.mockReturnValue({})
     // No registered session unless a test says so: a refused release now arms a
@@ -425,7 +431,7 @@ describe('OMP RPC chat IPC handlers', () => {
 
   // F12: switch_session requires the resolved absolute path, not the bare id
   // — acquisition must fail closed rather than pass the id through unresolved.
-  it('fails closed when the bare session id cannot be resolved to a file path', async () => {
+  it('fails closed when the bare session id resolves to neither an existing nor a fresh file', async () => {
     resolveSessionFilePath.mockResolvedValue(null)
     registerOmpRpcChatHandlers()
     await expect(
@@ -437,6 +443,53 @@ describe('OMP RPC chat IPC handlers', () => {
       })
     ).resolves.toEqual({ ok: false, reason: 'spawn-failed' })
     expect(registryInstance.acquire).not.toHaveBeenCalled()
+  })
+
+  // A pane on a brand-new session has no file for the id lookup to find, so
+  // without the fresh-target lookup acquisition refuses exactly the pane this
+  // feature exists for. The path still comes from OMP's own breadcrumb.
+  it('acquires a fresh session on the breadcrumb-named path the id lookup cannot find', async () => {
+    resolveSessionFilePath.mockResolvedValue(null)
+    resolveOmpFreshSessionTargetPath.mockResolvedValue('/sessions/2026_fresh.jsonl')
+    registryInstance.acquire.mockResolvedValue({ status: 'acquired', session: {} })
+    registryInstance.claimedSessionFilePathsExcluding.mockReturnValue(
+      new Set(['/sessions/x.jsonl'])
+    )
+    registerOmpRpcChatHandlers()
+
+    await expect(
+      invoke('ompRpcChat:acquire', {
+        paneKey: 'tab:leaf',
+        ptyId: 'pty-1',
+        cwd: '/work',
+        sessionFile: 'session-fresh'
+      })
+    ).resolves.toEqual({ ok: true })
+    expect(resolveOmpFreshSessionTargetPath).toHaveBeenCalledWith(
+      { cwd: '/work', sessionId: 'session-fresh' },
+      { claimedSessionFilePaths: new Set(['/sessions/x.jsonl']) }
+    )
+    expect(registryInstance.acquire.mock.calls[0]?.[0]).toMatchObject({
+      sessionFile: 'session-fresh',
+      sessionFilePath: '/sessions/2026_fresh.jsonl'
+    })
+  })
+
+  // The verified id lookup owns every existing session: a fresh target must
+  // never be able to redirect acquisition off the file that lookup found.
+  it('never consults the fresh-target lookup when the id resolves to a real file', async () => {
+    registryInstance.acquire.mockResolvedValue({ status: 'acquired', session: {} })
+    registerOmpRpcChatHandlers()
+
+    await expect(
+      invoke('ompRpcChat:acquire', {
+        paneKey: 'tab:leaf',
+        ptyId: 'pty-1',
+        cwd: '/work',
+        sessionFile: 'session-id-1'
+      })
+    ).resolves.toEqual({ ok: true })
+    expect(resolveOmpFreshSessionTargetPath).not.toHaveBeenCalled()
   })
 
   // XLR-045 (cross-lab review): `rpc-child-unverifiable` owes the pane neither

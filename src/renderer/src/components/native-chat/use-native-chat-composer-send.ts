@@ -59,9 +59,10 @@ export type UseNativeChatComposerSendArgs = {
   sendOmpRpcChat: (text: string) => boolean
   /** A catalog slash command routed through that same owned session. */
   sendOmpRpcCommand: (text: string) => boolean
-  /** A bare interactive command answered by Orca's own card instead of the
-   *  wire (`/switch` opens the model picker). */
-  openOmpRpcCommandCard: (text: string) => boolean
+  /** A bare interactive command answered by Orca itself instead of the wire:
+   *  its card (`/switch` opens the model picker) when the pane can drive one,
+   *  a local notice when it cannot. */
+  claimOmpRpcInteractiveCommand: (text: string) => boolean
   onSlashCommand?: (command: string, outcome?: NativeChatCommandMarkerOutcome) => void
   onOptimisticSend?: (text: string, imagePaths?: string[]) => string | undefined
   sessionOptionsSurface: NativeChatPtySessionOptionsSurface | null
@@ -94,7 +95,7 @@ export function useNativeChatComposerSend(
     sendOmpLocalCommand,
     sendOmpRpcChat,
     sendOmpRpcCommand,
-    openOmpRpcCommandCard,
+    claimOmpRpcInteractiveCommand,
     onSlashCommand,
     onOptimisticSend,
     sessionOptionsSurface,
@@ -148,9 +149,14 @@ export function useNativeChatComposerSend(
       // and for one it does not publish, that route declines and the draft
       // ends up as a prompt for the model. Neither is what the user asked
       // for. Nothing is put on the wire here — the card's own answer
-      // dispatches a verb — so no send telemetry and no outgoing-command
-      // record, and the draft is consumed because the card now carries it.
-      if (classification !== 'chat' && imagePaths.length === 0 && openOmpRpcCommandCard(text)) {
+      // dispatches a verb, or the claim answers locally on a pane with no
+      // session to drive one — so no send telemetry and no outgoing-command
+      // record, and the draft is consumed because the claim now carries it.
+      if (
+        classification !== 'chat' &&
+        imagePaths.length === 0 &&
+        claimOmpRpcInteractiveCommand(text)
+      ) {
         setHistory((prev) => pushHistory(prev, text))
         setDraft('')
         setCaret(0)
@@ -333,7 +339,7 @@ export function useNativeChatComposerSend(
       sendOmpLocalCommand,
       sendOmpRpcChat,
       sendOmpRpcCommand,
-      openOmpRpcCommandCard,
+      claimOmpRpcInteractiveCommand,
       structuredTransport,
       sendStructured,
       hasPendingAttachment,

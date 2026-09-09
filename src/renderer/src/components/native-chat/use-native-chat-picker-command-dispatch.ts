@@ -28,9 +28,10 @@ export function useNativeChatPickerCommandDispatch(args: {
   /** Sends a catalog command over the RPC session owning this pane; `false`
    *  means it declined and the PTY path below still applies. */
   sendOmpRpcCommand?: (text: string) => boolean
-  /** Claims a bare interactive command by opening Orca's card for it, exactly
-   *  as typing it does; `false` means the routes below still apply. */
-  openOmpRpcCommandCard?: (text: string) => boolean
+  /** Claims a bare interactive command exactly as typing it does — Orca's
+   *  card when the pane can drive one, a local notice when it cannot;
+   *  `false` means the routes below still apply. */
+  claimOmpRpcInteractiveCommand?: (text: string) => boolean
   disabled: boolean
   isDispatchingSessionOption: boolean
   resolveTarget: () => NativeChatResolvedTarget | null
@@ -49,7 +50,7 @@ export function useNativeChatPickerCommandDispatch(args: {
     agent,
     ompRpcCwd = null,
     sendOmpRpcCommand,
-    openOmpRpcCommandCard,
+    claimOmpRpcInteractiveCommand,
     disabled,
     isDispatchingSessionOption,
     resolveTarget,
@@ -72,10 +73,11 @@ export function useNativeChatPickerCommandDispatch(args: {
       }
       // Why before every send route: picking `/switch` from the menu must
       // behave exactly like typing it — Orca's own card, not the degraded text
-      // answer the wire would give. Nothing is sent, so this records no
-      // outgoing command and no message-sent telemetry; the card's answer
-      // dispatches the verb and writes the marker.
-      if (openOmpRpcCommandCard?.(text)) {
+      // answer the wire would give, and not the PTY forward that would open
+      // OMP's overlay behind the chat view. Nothing is sent, so this records
+      // no outgoing command and no message-sent telemetry; the claim's own
+      // answer (the card's verb, or a local notice) writes the marker.
+      if (claimOmpRpcInteractiveCommand?.(text)) {
         emitNativeChatPickerItemAccepted({ agent, itemKind: 'command' })
         setHistory((previous) => pushHistory(previous, text))
         setDraft('')
@@ -185,7 +187,7 @@ export function useNativeChatPickerCommandDispatch(args: {
       ompRpcCwd,
       onSlashCommand,
       resolveTarget,
-      openOmpRpcCommandCard,
+      claimOmpRpcInteractiveCommand,
       sendOmpRpcCommand,
       sessionOptionsSurface,
       setActiveSuggestion,

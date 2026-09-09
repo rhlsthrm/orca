@@ -17,7 +17,10 @@
 
 import { useEffect, useRef, useState } from 'react'
 import type { AgentType } from '../../../../shared/agent-status-types'
-import type { OmpRpcChatResolveSessionIdentityResult } from '../../../../shared/omp-rpc-chat-ipc-contract'
+import type {
+  OmpRpcChatResolveSessionIdentityResult,
+  OmpRpcChatSessionIdentitySource
+} from '../../../../shared/omp-rpc-chat-ipc-contract'
 import type { ProjectExecutionRuntimeResolution } from '../../../../shared/project-execution-runtime'
 import { canOwnOmpRpcSessionLocally, resolveOmpRpcPaneExecutionHost } from './omp-rpc-pane-locality'
 import { isOmpRpcCatalogAgent } from './use-omp-rpc-commands'
@@ -43,7 +46,9 @@ export type UseOmpPaneSessionIdentityArgs = {
 type ResolvedForIdentity = {
   identityKey: string
   sessionId: string | null
-  source: 'breadcrumb' | 'mtime-fallback' | null
+  /** Taken from the contract union rather than re-listed, so a source added
+   *  main-side cannot silently miss the precedence rule below. */
+  source: OmpRpcChatSessionIdentitySource | null
 }
 
 // Module constant so the ineligible reset below is Object.is-stable and cannot
@@ -223,10 +228,14 @@ export function useOmpPaneSessionIdentity(args: UseOmpPaneSessionIdentityArgs): 
     // state naturally on the next render.
     const mergeSticky = (result: OmpPaneIdentityProbeResult): void => {
       setResolved((prev) => {
+        // A materialized `breadcrumb` hit outranks every weaker source: an
+        // mtime guess, and a `fresh-breadcrumb` target the pane's own TUI may
+        // since have left for a real session. Both name a session this pane
+        // could legitimately move off; a breadcrumb hit is what it is on now.
         if (
           prev.identityKey === identityKey &&
           prev.sessionId !== null &&
-          !(prev.source === 'mtime-fallback' && result?.source === 'breadcrumb')
+          !(result?.source === 'breadcrumb' && prev.source !== 'breadcrumb')
         ) {
           return prev
         }

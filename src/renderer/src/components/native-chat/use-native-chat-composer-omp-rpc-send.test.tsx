@@ -3,6 +3,8 @@
 import { act, renderHook } from '@testing-library/react'
 import { describe, expect, it, vi } from 'vitest'
 import { useNativeChatComposerOmpRpcSend } from './use-native-chat-composer-omp-rpc-send'
+import { isMacPlatform } from './native-chat-shortcut'
+import { ompRpcCardCommandUnavailableNotice } from './omp-rpc-terminal-only-commands'
 
 describe('useNativeChatComposerOmpRpcSend', () => {
   it('applies follow-up to one send and clears the toggle immediately', () => {
@@ -119,12 +121,25 @@ describe('useNativeChatComposerOmpRpcSend', () => {
     expect(reportMessageFailure).toHaveBeenCalledWith(7)
   })
 
-  describe('openOmpRpcCommandCard', () => {
+  describe('claimOmpRpcInteractiveCommand', () => {
     function claim(
       text: string,
-      binding: { isOwned?: boolean; agent?: 'omp' | 'claude' } = {}
-    ): { claimed: boolean; openInteractiveCard: ReturnType<typeof vi.fn> } {
+      binding: {
+        isOwned?: boolean
+        agent?: 'omp' | 'claude'
+        /** Panes whose binding exposes no card opener cannot drive a card
+         *  either, so they must answer locally rather than fall through. */
+        withCardOpener?: boolean
+        /** A caller with no marker sink cannot render the notice. */
+        withSlashCommand?: boolean
+      } = {}
+    ): {
+      claimed: boolean
+      openInteractiveCard: ReturnType<typeof vi.fn>
+      onSlashCommand: ReturnType<typeof vi.fn>
+    } {
       const openInteractiveCard = vi.fn()
+      const onSlashCommand = vi.fn()
       const hook = renderHook(() =>
         useNativeChatComposerOmpRpcSend({
           agent: binding.agent ?? 'omp',
@@ -132,18 +147,24 @@ describe('useNativeChatComposerOmpRpcSend', () => {
             isOwned: binding.isOwned ?? true,
             isTurnWorking: false,
             send: vi.fn().mockResolvedValue({ ok: true }),
-            openInteractiveCard
+            ...(binding.withCardOpener === false ? {} : { openInteractiveCard })
           },
+          ...(binding.withSlashCommand === false ? {} : { onSlashCommand }),
           setNotice: vi.fn()
         })
       )
-      return { claimed: hook.result.current.openOmpRpcCommandCard(text), openInteractiveCard }
+      return {
+        claimed: hook.result.current.claimOmpRpcInteractiveCommand(text),
+        openInteractiveCard,
+        onSlashCommand
+      }
     }
 
     it('claims a bare registered command and opens its card under the canonical name', () => {
       const bare = claim('/switch')
       expect(bare.claimed).toBe(true)
       expect(bare.openInteractiveCard).toHaveBeenCalledWith('switch')
+      expect(bare.onSlashCommand).not.toHaveBeenCalled()
 
       const alias = claim('/model')
       expect(alias.claimed).toBe(true)
@@ -154,17 +175,47 @@ describe('useNativeChatComposerOmpRpcSend', () => {
       const argumented = claim('/switch gpt-6-astra')
       expect(argumented.claimed).toBe(false)
       expect(argumented.openInteractiveCard).not.toHaveBeenCalled()
+
+      // Same on a pane with no session: an argumented invocation is a real
+      // wire command OMP answers, so it keeps the route it has today.
+      const unowned = claim('/switch gpt-6-astra', { isOwned: false })
+      expect(unowned.claimed).toBe(false)
+      expect(unowned.onSlashCommand).not.toHaveBeenCalled()
     })
 
-    it('claims nothing on a pane the RPC child does not own, or a non-OMP agent', () => {
-      expect(claim('/switch', { isOwned: false }).claimed).toBe(false)
-      expect(claim('/switch', { agent: 'claude' }).claimed).toBe(false)
+    // The trap this replaces (live, omp 18.1.15): the draft fell through to
+    // the PTY, OMP's model picker opened behind the chat view, and every
+    // later message was swallowed by that invisible overlay.
+    it('answers a card-backed command locally when the pane cannot drive a card', () => {
+      const notice = ompRpcCardCommandUnavailableNotice('switch', isMacPlatform())
+      for (const binding of [{ isOwned: false }, { withCardOpener: false }]) {
+        const unavailable = claim('/switch', binding)
+        expect(unavailable.claimed).toBe(true)
+        expect(unavailable.openInteractiveCard).not.toHaveBeenCalled()
+        expect(unavailable.onSlashCommand).toHaveBeenCalledWith('/switch', {
+          outputText: notice,
+          agentInvoked: false
+        })
+      }
+    })
+
+    it('declines instead of swallowing the draft when nothing can render the notice', () => {
+      const noSink = claim('/switch', { isOwned: false, withSlashCommand: false })
+      expect(noSink.claimed).toBe(false)
+      expect(noSink.openInteractiveCard).not.toHaveBeenCalled()
+    })
+
+    it('claims nothing on a non-OMP agent', () => {
+      const claude = claim('/switch', { agent: 'claude' })
+      expect(claude.claimed).toBe(false)
+      expect(claude.onSlashCommand).not.toHaveBeenCalled()
     })
 
     it('leaves an unregistered command alone', () => {
       const unregistered = claim('/usage')
       expect(unregistered.claimed).toBe(false)
       expect(unregistered.openInteractiveCard).not.toHaveBeenCalled()
+      expect(unregistered.onSlashCommand).not.toHaveBeenCalled()
     })
   })
 })
