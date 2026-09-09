@@ -27,6 +27,12 @@ import {
 } from './native-chat-composer-target'
 import { pushHistory, type HistoryState } from './native-chat-composer-state'
 import { useNativeChatStructuredComposerSend } from './use-native-chat-structured-composer-send'
+import { isMacPlatform } from './native-chat-shortcut'
+import { isOmpRpcCatalogAgent } from './omp-rpc-command-catalog'
+import {
+  findOmpRpcTerminalOnlyCommand,
+  ompRpcTerminalOnlyCommandNotice
+} from './omp-rpc-terminal-only-commands'
 import type { NativeChatCommandMarkerOutcome } from './native-chat-command-marker'
 import type { NativeChatComposerImageAttachment } from './NativeChatComposerField'
 import type { NativeChatStructuredComposerTransport } from './native-chat-composer-types'
@@ -145,6 +151,33 @@ export function useNativeChatComposerSend(
       // dispatches a verb — so no send telemetry and no outgoing-command
       // record, and the draft is consumed because the card now carries it.
       if (classification !== 'chat' && imagePaths.length === 0 && openOmpRpcCommandCard(text)) {
+        setHistory((prev) => pushHistory(prev, text))
+        setDraft('')
+        setCaret(0)
+        clearSkillOrigin()
+        setNotice(null)
+        return
+      }
+      // Why here — after the card claim, before every send route: OMP's RPC
+      // layer does not dispatch a builtin that has no text handler. It hands
+      // the raw text to `session.prompt()` (rpc-mode.ts), so a bare
+      // `/settings` costs a model turn and answers nothing. Orca has no verb
+      // for a full-screen selector either, so the only true answer is a local
+      // notice naming the surface and the view toggle. Nothing reaches the
+      // wire, no card opens, and the marker's own `agentInvoked: false` states
+      // that no agent ran. The lookup matches the bare invocation only, so
+      // `/plan add auth` keeps the route it already has.
+      const terminalOnly =
+        classification !== 'chat' && imagePaths.length === 0 && isOmpRpcCatalogAgent(agent)
+          ? findOmpRpcTerminalOnlyCommand(text)
+          : null
+      // No `onSlashCommand` means nothing can render the notice, so the draft
+      // keeps its existing route rather than being swallowed silently.
+      if (terminalOnly && onSlashCommand) {
+        onSlashCommand(text.trim(), {
+          outputText: ompRpcTerminalOnlyCommandNotice(terminalOnly, isMacPlatform()),
+          agentInvoked: false
+        })
         setHistory((prev) => pushHistory(prev, text))
         setDraft('')
         setCaret(0)

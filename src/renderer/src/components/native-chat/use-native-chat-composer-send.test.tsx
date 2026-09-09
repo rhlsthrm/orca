@@ -14,7 +14,8 @@ const submitNativeChatPrompt = vi.fn()
 const clearNativeChatLaunchDraft = vi.fn()
 
 vi.mock('@/i18n/i18n', () => ({
-  translate: (_key: string, fallback: string) => fallback
+  translate: (_key: string, fallback: string, options?: Record<string, unknown>) =>
+    fallback.replace(/\{\{(\w+)\}\}/gu, (_match, name: string) => String(options?.[name] ?? ''))
 }))
 vi.mock('./native-chat-runtime-send', () => ({
   sendNativeChatMessage: (...args: unknown[]) => sendNativeChatMessage(...args),
@@ -35,6 +36,11 @@ vi.mock('../../store', () => ({
 }))
 
 import { useNativeChatComposerSend } from './use-native-chat-composer-send'
+import { isMacPlatform } from './native-chat-shortcut'
+import {
+  findOmpRpcTerminalOnlyCommand,
+  ompRpcTerminalOnlyCommandNotice
+} from './omp-rpc-terminal-only-commands'
 
 const PTY_TARGET: NativeChatResolvedTarget = { ptyId: 'pty-1', settings: {} }
 
@@ -48,6 +54,7 @@ function buildArgs(overrides: Partial<UseNativeChatComposerSendArgs> = {}): {
   sendOmpRpcCommand: ReturnType<typeof vi.fn>
   openOmpRpcCommandCard: ReturnType<typeof vi.fn>
   resolveTarget: ReturnType<typeof vi.fn>
+  onSlashCommand: ReturnType<typeof vi.fn>
 } {
   const setNotice = vi.fn()
   const setHistory = vi.fn()
@@ -61,6 +68,7 @@ function buildArgs(overrides: Partial<UseNativeChatComposerSendArgs> = {}): {
   const sendOmpRpcCommand = vi.fn(() => false)
   const openOmpRpcCommandCard = vi.fn(() => false)
   const resolveTarget = vi.fn((): NativeChatResolvedTarget | null => null)
+  const onSlashCommand = vi.fn()
   const classification: NativeChatSendClassification = 'chat'
   const classifySend = vi.fn(() => classification)
   const args: UseNativeChatComposerSendArgs = {
@@ -87,6 +95,7 @@ function buildArgs(overrides: Partial<UseNativeChatComposerSendArgs> = {}): {
     clearSkillOrigin,
     clearImageAttachments,
     setNotice,
+    onSlashCommand,
     ...overrides
   }
   return {
@@ -98,7 +107,8 @@ function buildArgs(overrides: Partial<UseNativeChatComposerSendArgs> = {}): {
     sendOmpRpcChat: args.sendOmpRpcChat as ReturnType<typeof vi.fn>,
     sendOmpRpcCommand: args.sendOmpRpcCommand as ReturnType<typeof vi.fn>,
     openOmpRpcCommandCard: args.openOmpRpcCommandCard as ReturnType<typeof vi.fn>,
-    resolveTarget: args.resolveTarget as ReturnType<typeof vi.fn>
+    resolveTarget: args.resolveTarget as ReturnType<typeof vi.fn>,
+    onSlashCommand: args.onSlashCommand as ReturnType<typeof vi.fn>
   }
 }
 
@@ -277,5 +287,99 @@ describe('useNativeChatComposerSend', () => {
 
     expect(resolveTarget).not.toHaveBeenCalled()
     expect(sendOmpLocalCommand).not.toHaveBeenCalled()
+  })
+
+  describe('terminal-only OMP commands', () => {
+    // OMP forwards a builtin with no text handler straight to the model
+    // (rpc-mode.ts), so these must never reach any send route.
+    it('answers a bare invocation with a local notice and sends nothing', () => {
+      for (const command of ['/settings', '/agents']) {
+        vi.clearAllMocks()
+        const {
+          args,
+          onSlashCommand,
+          resolveTarget,
+          sendOmpRpcCommand,
+          sendOmpLocalCommand,
+          sendOmpRpcChat,
+          setDraft
+        } = buildArgs({
+          agent: 'omp',
+          draft: command,
+          classifySend: vi.fn((): NativeChatSendClassification => 'unknown-token')
+        })
+        const { result } = renderHook(() => useNativeChatComposerSend(args))
+
+        act(() => result.current())
+
+        const entry = findOmpRpcTerminalOnlyCommand(command)
+        expect(entry, `${command} must be a table row`).not.toBeNull()
+        expect(onSlashCommand).toHaveBeenCalledWith(command, {
+          outputText: ompRpcTerminalOnlyCommandNotice(entry!, isMacPlatform()),
+          agentInvoked: false
+        })
+        expect(sendOmpRpcCommand).not.toHaveBeenCalled()
+        expect(sendOmpLocalCommand).not.toHaveBeenCalled()
+        expect(sendOmpRpcChat).not.toHaveBeenCalled()
+        expect(resolveTarget).not.toHaveBeenCalled()
+        expect(sendNativeChatMessage).not.toHaveBeenCalled()
+        expect(setDraft).toHaveBeenCalledWith('')
+      }
+    })
+
+    it('leaves an argumented invocation on its existing route', () => {
+      const { args, onSlashCommand } = buildArgs({
+        agent: 'omp',
+        draft: '/settings something',
+        classifySend: vi.fn((): NativeChatSendClassification => 'unknown-token'),
+        resolveTarget: vi.fn(() => PTY_TARGET)
+      })
+      const { result } = renderHook(() => useNativeChatComposerSend(args))
+
+      act(() => result.current())
+
+      expect(sendNativeChatMessage).toHaveBeenCalledWith(
+        {},
+        'pty-1',
+        '/settings something',
+        undefined
+      )
+      expect(onSlashCommand).not.toHaveBeenCalled()
+    })
+
+    // A card is strictly better than "go to the terminal", so a table row must
+    // never be able to intercept a command a card drives.
+    it('never diverts a card-backed command, even when the card claim declines', () => {
+      const { args, onSlashCommand, sendOmpRpcCommand } = buildArgs({
+        agent: 'omp',
+        draft: '/switch',
+        classifySend: vi.fn((): NativeChatSendClassification => 'command'),
+        openOmpRpcCommandCard: vi.fn(() => false),
+        sendOmpRpcCommand: vi.fn(() => true)
+      })
+      const { result } = renderHook(() => useNativeChatComposerSend(args))
+
+      act(() => result.current())
+
+      expect(sendOmpRpcCommand).toHaveBeenCalledWith('/switch')
+      expect(onSlashCommand).not.toHaveBeenCalled()
+    })
+
+    // `/plan` is a real Codex command that its TUI runs; only OMP's registry
+    // makes it terminal-only.
+    it('leaves an identically-named command on a non-OMP agent alone', () => {
+      const { args, onSlashCommand } = buildArgs({
+        agent: 'codex',
+        draft: '/plan',
+        classifySend: vi.fn((): NativeChatSendClassification => 'command'),
+        resolveTarget: vi.fn(() => PTY_TARGET)
+      })
+      const { result } = renderHook(() => useNativeChatComposerSend(args))
+
+      act(() => result.current())
+
+      expect(sendNativeChatTypedCommand).toHaveBeenCalledWith({}, 'pty-1', '/plan')
+      expect(onSlashCommand).toHaveBeenCalledWith('/plan')
+    })
   })
 })

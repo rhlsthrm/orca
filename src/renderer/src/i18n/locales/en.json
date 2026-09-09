@@ -17245,6 +17245,9 @@
         "ran": "Ran {{command}}",
         "outputTruncated": "_Output truncated._",
         "localCommandNote": "Local command — agent not invoked"
+      },
+      "terminalOnlyCommand": {
+        "notice": "`/{{command}}` opens {{surface}}, which OMP only draws in the terminal view. Press {{shortcut}} to switch to it."
       }
     },
     "tab": {
