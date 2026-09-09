@@ -1,9 +1,13 @@
-import { AlertTriangle, Check, Loader2 } from 'lucide-react'
-import { useMemo, useState } from 'react'
+import { AlertTriangle, Loader2 } from 'lucide-react'
+import { useState } from 'react'
 import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { translate } from '@/i18n/i18n'
 import { NativeChatOmpRpcCardShell } from './NativeChatOmpRpcCardShell'
+import {
+  NativeChatOmpRpcSelectList,
+  type NativeChatOmpRpcSelectOption
+} from './NativeChatOmpRpcSelectList'
 import type {
   OmpRpcInteractiveCardChoice,
   OmpRpcInteractiveCardModel
@@ -204,24 +208,11 @@ function SelectBody({
   onChoose,
   onDismiss
 }: {
-  options: readonly {
-    id: string
-    label: string
-    description?: string
-    current?: boolean
-    disabled?: boolean
-  }[]
+  options: readonly NativeChatOmpRpcSelectOption[]
   pending: boolean
   onChoose: (choice: OmpRpcInteractiveCardChoice) => void
   onDismiss: () => void
 }): React.JSX.Element {
-  // Default focus lands on the row OMP reported as current so Enter commits
-  // the obvious choice; with no reported current row it lands on the first
-  // selectable one, which asserts nothing about the child's state.
-  const focusIndex = useMemo(() => {
-    const current = options.findIndex((option) => option.current === true && !option.disabled)
-    return current === -1 ? options.findIndex((option) => !option.disabled) : current
-  }, [options])
   return (
     <div className="flex flex-col gap-2">
       {options.length === 0 ? (
@@ -232,32 +223,12 @@ function SelectBody({
           )}
         </p>
       ) : (
-        <div className="flex max-h-64 flex-col gap-1 overflow-y-auto scrollbar-sleek">
-          {options.map((option, index) => (
-            <button
-              key={option.id}
-              autoFocus={index === focusIndex}
-              type="button"
-              disabled={pending || option.disabled === true}
-              data-current={option.current === true ? 'true' : undefined}
-              onClick={() => onChoose({ kind: 'select', optionId: option.id })}
-              className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-left hover:bg-accent focus-visible:ring-2 focus-visible:ring-ring focus-visible:outline-none disabled:opacity-50 data-[current=true]:bg-accent"
-            >
-              <Check
-                aria-hidden
-                className={`size-3.5 shrink-0 ${option.current === true ? '' : 'invisible'}`}
-              />
-              <span className="min-w-0 flex-1">
-                <span className="block truncate text-xs text-foreground">{option.label}</span>
-                {option.description ? (
-                  <span className="block truncate text-[11px] text-muted-foreground">
-                    {option.description}
-                  </span>
-                ) : null}
-              </span>
-            </button>
-          ))}
-        </div>
+        <NativeChatOmpRpcSelectList
+          options={options}
+          disabled={pending}
+          onChoose={(optionId) => onChoose({ kind: 'select', optionId })}
+          onCancel={onDismiss}
+        />
       )}
       <div className="flex items-center gap-2">
         <DismissButton onDismiss={onDismiss} />

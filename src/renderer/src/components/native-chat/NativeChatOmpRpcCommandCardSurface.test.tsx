@@ -74,12 +74,12 @@ describe('NativeChatOmpRpcCommandCardSurface', () => {
     // The card names the command and the title comes from the registry.
     expect(await screen.findByText('Model')).toBeInTheDocument()
     expect(screen.getByText('/switch')).toBeInTheDocument()
-    const current = await waitFor(() => screen.getByRole('button', { name: /GPT-6 Astra/ }))
+    const current = await waitFor(() => screen.getByRole('option', { name: /GPT-6 Astra/ }))
     expect(current).toHaveAttribute('data-current', 'true')
-    expect(screen.getByRole('button', { name: /Opus 5/ })).not.toHaveAttribute('data-current')
+    expect(screen.getByRole('option', { name: /Opus 5/ })).not.toHaveAttribute('data-current')
 
     await act(async () => {
-      fireEvent.click(screen.getByRole('button', { name: /Opus 5/ }))
+      fireEvent.click(screen.getByRole('option', { name: /Opus 5/ }))
     })
 
     expect(setModel).toHaveBeenCalledWith({

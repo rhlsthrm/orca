@@ -3,6 +3,7 @@ import { Button } from '@/components/ui/button'
 import { Input } from '@/components/ui/input'
 import { translate } from '@/i18n/i18n'
 import { NativeChatOmpRpcCardShell } from './NativeChatOmpRpcCardShell'
+import { NativeChatOmpRpcSelectList } from './NativeChatOmpRpcSelectList'
 import type {
   OmpRpcExtensionUiRequestFrame,
   OmpRpcExtensionUiResponse
@@ -35,6 +36,9 @@ export function NativeChatExtensionUiCard({
     </p>
   ) : null
 
+  const cancel = (): void =>
+    onAnswer({ type: 'extension_ui_response', id: request.id, cancelled: true })
+
   if (request.method === 'select') {
     const options = request.options ?? []
     return (
@@ -43,34 +47,34 @@ export function NativeChatExtensionUiCard({
         message={request.message}
         footer={timeoutNotice}
       >
-        <div className="flex flex-wrap gap-2">
-          {options.map((option, index) => (
-            <Button
-              key={option}
-              type="button"
-              variant={index === 0 ? 'default' : 'outline'}
-              size="sm"
-              title={request.optionDetails?.[index]?.description}
-              onClick={() =>
-                onAnswer({ type: 'extension_ui_response', id: request.id, value: option })
-              }
-            >
-              {option}
-            </Button>
-          ))}
+        <div className="flex flex-col gap-2">
+          {options.length > 0 ? (
+            <NativeChatOmpRpcSelectList
+              // The INDEX is the row id: two identical option strings stay two
+              // distinct rows, and the answer maps straight back to the string
+              // OMP sent, which is what the child is waiting for.
+              options={options.map((option, index) => ({
+                id: String(index),
+                label: option,
+                description: request.optionDetails?.[index]?.description
+              }))}
+              onChoose={(optionId) => {
+                const value = options[Number(optionId)]
+                if (value !== undefined) {
+                  onAnswer({ type: 'extension_ui_response', id: request.id, value })
+                }
+              }}
+              onCancel={cancel}
+            />
+          ) : null}
           {/* Why (F6): the pane's only input while a request is pending must
            *  always offer a decline path — an options list, even a
            *  legitimately empty one, is never the only way out. */}
-          <Button
-            type="button"
-            variant="ghost"
-            size="sm"
-            onClick={() =>
-              onAnswer({ type: 'extension_ui_response', id: request.id, cancelled: true })
-            }
-          >
-            {translate('components.native-chat.extensionUi.cancel', 'Cancel')}
-          </Button>
+          <div className="flex">
+            <Button type="button" variant="ghost" size="sm" onClick={cancel}>
+              {translate('components.native-chat.extensionUi.cancel', 'Cancel')}
+            </Button>
+          </div>
         </div>
       </NativeChatOmpRpcCardShell>
     )
@@ -145,14 +149,7 @@ export function NativeChatExtensionUiCard({
         {/* Why (F6): a request without a `timeout` would otherwise wedge the
          *  pane indefinitely — the composer is unmounted while a request is
          *  pending, so this card must always offer a way out. */}
-        <Button
-          type="button"
-          variant="ghost"
-          size="sm"
-          onClick={() =>
-            onAnswer({ type: 'extension_ui_response', id: request.id, cancelled: true })
-          }
-        >
+        <Button type="button" variant="ghost" size="sm" onClick={cancel}>
           {translate('components.native-chat.extensionUi.cancel', 'Cancel')}
         </Button>
       </div>

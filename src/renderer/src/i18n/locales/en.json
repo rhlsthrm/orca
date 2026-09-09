@@ -17240,6 +17240,11 @@
         "inputPlaceholder": "Type your answer…",
         "submit": "Submit"
       },
+      "ompRpcSelect": {
+        "filterLabel": "Filter options",
+        "filterPlaceholder": "Filter…",
+        "noMatches": "No options match."
+      },
       "reasoningLabel": "Reasoning",
       "commandMarker": {
         "ran": "Ran {{command}}",
@@ -17251,6 +17256,20 @@
       },
       "cardCommandUnavailable": {
         "notice": "`/{{command}}` needs this pane’s chat session, which is not connected yet. Press {{shortcut}} to run it in the terminal view."
+      },
+      "ompRpcCommandCard": {
+        "loading": "Reading agent state…",
+        "confirm": "Confirm",
+        "noRows": "The agent reported nothing for this command.",
+        "close": "Close",
+        "noOptions": "The agent reported no options for this command.",
+        "submit": "Submit",
+        "cancel": "Cancel",
+        "working": "Working…",
+        "bridgeUnavailable": "This command needs the desktop agent connection, which is not available here.",
+        "gateSendFailed": "Orca could not send this command over the agent connection.",
+        "applyRefused": "The agent refused this change.",
+        "unknownCommand": "This command no longer has a card in this build."
       }
     },
     "tab": {
